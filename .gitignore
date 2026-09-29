@@ -1,0 +1,26 @@
+.venv/
+__pycache__/
+*.egg-info/
+.pytest_cache/
+.ruff_cache/
+build/
+dist/
+release/
+scratch/
+numba_cache/
+
+# Depth model: Apache-2.0 but ~100 MB, so it is fetched/regenerated rather than
+# committed. scripts/get_model.* puts it in ultimate_video_3d/assets/onnx/.
+ultimate_video_3d/assets/onnx/
+*.onnx
+
+# Test media: not ours to redistribute, and the app needs no sample data to run.
+sample_video/
+sample_image/
+*.mp4
+*.mov
+*.mkv
+*.webm
+*.log
+crash.log
+settings.json

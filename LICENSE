@@ -1,0 +1,84 @@
+Ultimate Video to 3D Studio — Licence
+Copyright (c) 2026 criso2hd-alt. All rights reserved.
+
+This is source-available software, not open source. The source is published so
+that anyone can read it, audit it, and build it for themselves. It is not
+published for reuse in other products, and it is not published so that anyone
+else can make money from it.
+
+
+YOU MAY
+
+  1. Use this software for any purpose, personal or commercial, free of charge.
+     That includes using it to convert video you then sell or publish.
+  2. Read, study, and audit the source code.
+  3. Build it from source for your own use.
+  4. Modify it for your own use.
+  5. Link to the official repository, and share screenshots, comparisons,
+     videos and reviews of output produced with it.
+
+
+YOU MAY NOT
+
+  6. Sell, licence, rent, or otherwise charge for this software, in whole or in
+     part, whether on its own or bundled with anything else.
+  7. Redistribute it - including builds, modified versions, forks published as
+     downloads, mirrors, reuploads, installers, or "repacks". Direct people to
+     the official repository instead:
+
+         https://github.com/criso2hd-alt/Ultimate-Video-to-3D-Studio
+
+  8. Put it behind a paywall, a subscription, a "supporter" tier, an ad gateway,
+     a link shortener that pays you, or any other arrangement that extracts
+     money or attention as a condition of obtaining it.
+  9. Use the source code, or any part of it, in another product, service or
+     project - commercial or not - or offer it (or a conversion service built
+     on it) to others for a fee.
+ 10. Present it as your own work, or remove or obscure this notice, the
+     support banner, or the credit to the author.
+ 11. Change, replace, hide, disable or work around the support banner, its
+     message, or the link it points to - for example to point it at your own
+     donation page - or bypass the checks that keep it intact. (A person using
+     the app may close the banner for the current session with its X; it
+     returns every time the app starts. That is the only sanctioned way to hide
+     it.)
+
+
+NO WARRANTY
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS
+FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHOR BE
+LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF
+CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE
+SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+
+
+THIRD-PARTY COMPONENTS
+
+This licence covers the source in this repository only. It does not change the
+terms of the components the application uses, each of which remains under its own
+licence:
+
+  - Depth Anything V2 Small (the depth model shipped with the app): Apache
+    License 2.0. The larger Base and Large models are CC-BY-NC-4.0 and are not
+    included.
+  - FFmpeg, through PyAV: downloaded at run time from PyPI, under its own
+    (LGPL/GPL) terms.
+  - Qt, through PySide6: LGPL.
+  - IBM Plex Sans / Mono (Copyright 2017 IBM Corp.) and Archivo (Copyright 2019 The Archivo Project
+    Authors): SIL Open Font License 1.1, text in ultimate_video_3d/assets/fonts/OFL.txt.
+  - ONNX Runtime, NumPy, OpenCV, Numba: their respective permissive licences.
+
+The application connects to the network only (1) to download the video component
+(FFmpeg via PyAV) from pypi.org the first time it is needed, and (2) to ask
+api.github.com, once at launch, whether a newer version has been published (this can
+be switched off in Settings; it only shows a notice and a link, and downloads and
+installs nothing). It has no telemetry.
+
+
+NOTE ON FORKING
+
+Publishing the source on a public host lets others view it and, by that host's
+terms, fork it. A fork made that way is for reading and personal use only, under
+the terms above.

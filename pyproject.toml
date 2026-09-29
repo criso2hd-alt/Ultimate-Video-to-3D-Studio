@@ -1,0 +1,43 @@
+[build-system]
+requires = ["setuptools>=75", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "ultimate-video-3d-studio"
+version = "0.1.0"
+description = "Turn flat video into stereoscopic 3D with AI depth. Any GPU, Windows and macOS."
+readme = "README.md"
+license = {file = "LICENSE"}
+requires-python = ">=3.12,<3.13"
+dependencies = [
+  "PySide6>=6.8,<7",
+  "numpy>=1.26",
+  "opencv-python-headless>=4.10,<5",
+  # The stereo warp, the colour grade and the tone mapper are Numba kernels: one
+  # implementation that runs on every CPU (Intel, AMD, Apple silicon) and needs
+  # no GPU toolkit.
+  "numba>=0.60",
+  # Depth runs on ONNX Runtime through whatever accelerator the platform offers.
+  # Windows: DirectML - any DirectX 12 GPU (NVIDIA, AMD, Intel), no CUDA install.
+  # macOS / Linux: the standard package (CoreML on a Mac, CPU elsewhere).
+  "onnxruntime-directml>=1.20,<2; sys_platform == 'win32'",
+  "onnxruntime>=1.20,<2; sys_platform != 'win32'",
+  # FFmpeg. Installed as a normal dependency when running from source; a frozen
+  # build leaves it out and downloads it on first use (see bootstrap.py).
+  "av>=13",
+  "psutil>=5.9",
+  "platformdirs>=4,<5",
+]
+
+[project.optional-dependencies]
+build = ["pyinstaller>=6.11,<7", "pillow>=10"]
+test = ["pytest>=8,<9"]
+
+[project.scripts]
+ultimate-video-3d = "ultimate_video_3d.app:main"
+
+[tool.setuptools.packages.find]
+include = ["ultimate_video_3d*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
