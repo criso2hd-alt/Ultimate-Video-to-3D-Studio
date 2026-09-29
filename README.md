@@ -1,14 +1,32 @@
+<div align="center">
+
+<img src="icon/icon_transparent.png" width="132" alt="Ultimate Video to 3D Studio" />
+
 # Ultimate Video to 3D Studio
 
-<p align="center"><img src="icon/icon_transparent.png" width="160" alt="Ultimate Video to 3D Studio"></p>
+**Turn any flat video into stereoscopic 3D with AI depth. Free, on any GPU, no CUDA.**
 
-Turn any flat video into **stereoscopic 3D**. AI estimates the depth of every
-frame, and the picture is re-rendered as a left/right pair for VR headsets, 3D
-TVs, projectors, or red/cyan glasses. Free to use, on **any GPU** — NVIDIA, AMD,
-Intel — with no CUDA install. **Version 0.1 is for Windows 11**; macOS is next (0.2).
+Side-by-Side · Top-and-Bottom · Anaglyph · Colour + Depth, for VR headsets, 3D TVs, projectors and red/cyan glasses.
 
-> ☕ It is free and will stay free. If it saved you time, there is a Buy Me a
-> Coffee button in the app.
+[![Download](https://img.shields.io/badge/⬇%20Download-Windows%20v0.1.0-2ea44f.svg)](https://github.com/criso2hd-alt/Ultimate-Video-to-3D-Studio/releases/latest)
+[![Discord](https://img.shields.io/badge/Discord-join%20the%20community-5865F2.svg?logo=discord&logoColor=white)](https://discord.gg/mEfSW3XfNn)
+[![Platform](https://img.shields.io/badge/Windows-11-0078D4.svg)](#download)
+[![Any GPU](https://img.shields.io/badge/GPU-NVIDIA%20·%20AMD%20·%20Intel-76b900.svg)](#how-it-works)
+[![Licence](https://img.shields.io/badge/Licence-source--available-orange.svg)](LICENSE)
+[![Buy Me A Coffee](https://img.shields.io/badge/☕%20Buy%20me%20a%20coffee-support-FFDD00.svg)](https://buymeacoffee.com/criso2hdj)
+
+<a href="docs/screenshots/hero-side-by-side.png"><img src="docs/screenshots/hero-side-by-side.png" width="1000" alt="Ultimate Video to 3D Studio: a video converted to side-by-side 3D, with the live preview, view bar and export settings" /></a>
+
+<sub>The real app at 2560 × 1440, on a demo scene rendered for this project. Click any picture to see it full size.</sub>
+
+[Download](#download) · [Screenshots](#screenshots) · [Features](#what-it-does) · [How it works](#how-it-works) · [Community](#community) · [Roadmap](#planned)
+
+</div>
+
+---
+
+> ☕ **It is free, and it will stay free.** If it saves you time or money, a coffee keeps it going and helps me
+> improve it. There is a button in the app and one above.
 
 ## Download
 
@@ -20,6 +38,25 @@ tests which video encoders your graphics card can use; a short tutorial follows.
 
 Windows may show a *SmartScreen* warning because the app is not code-signed yet: choose **More info →
 Run anyway**. (Only download it from this repository's Releases page.)
+
+Requires Windows 11 (64-bit) and a DirectX 12 graphics card. **macOS is coming in 0.2.**
+
+## Screenshots
+
+Real screenshots of the app, taken at **2560 × 1440**. The footage is a scene generated for this project
+(`scripts/make_demo_scene.py`), so the depth is easy to see.
+
+| The 3D views: anaglyph (red/cyan glasses) | The depth map the AI estimates |
+| :---: | :---: |
+| [<img src="docs/screenshots/anaglyph.png" alt="Anaglyph view">](docs/screenshots/anaglyph.png) | [<img src="docs/screenshots/depth-map.png" alt="Depth map view">](docs/screenshots/depth-map.png) |
+
+| Parallax: how far each pixel moves between the eyes | Professional colour correction, with scopes |
+| :---: | :---: |
+| [<img src="docs/screenshots/parallax.png" alt="Parallax view">](docs/screenshots/parallax.png) | [<img src="docs/screenshots/colour-correction.png" alt="Colour correction panel with histogram">](docs/screenshots/colour-correction.png) |
+
+| Every codec, with your GPU's encoder picked for you | A guided tutorial on first launch |
+| :---: | :---: |
+| [<img src="docs/screenshots/export.png" alt="Export settings">](docs/screenshots/export.png) | [<img src="docs/screenshots/tutorial.png" alt="The spotlight tutorial highlighting the view bar">](docs/screenshots/tutorial.png) |
 
 ## What it does
 
@@ -73,16 +110,26 @@ output size, so a card that *lists* NVENC but cannot use it falls back cleanly.
 Measured here (RTX 4080, 1620×1080 source → half-SBS H.265, hardware encode):
 ~16 fps end to end; depth 21 ms/frame and warp 9 ms/frame at 720p.
 
+## Community
+
+**[Join the Discord](https://discord.gg/mEfSW3XfNn)** to ask questions, share your conversions, report
+problems and tell me what to build next. Bug reports on [GitHub Issues](https://github.com/criso2hd-alt/Ultimate-Video-to-3D-Studio/issues)
+help too — run `python main.py --selftest` (or send a screenshot of Settings) so I can see your GPU and
+encoders.
+
+If the app earns a place in your workflow, [buying me a coffee](https://buymeacoffee.com/criso2hdj) is what
+keeps it free for everyone.
+
 ## Run from source
 
 Windows:
 
 ```powershell
-.\scripts\setup.ps1      # Python 3.12 venv, dependencies, depth model
-.\scripts\run.ps1
+.\scripts\setup.ps1      # Python 3.12 venv and dependencies
+.\scripts\run.ps1        # the depth model and video component download themselves on first run
 ```
 
-macOS:
+macOS (untested until 0.2):
 
 ```bash
 ./scripts/setup.sh
@@ -104,7 +151,8 @@ timings — paste it into a bug report.
 
 The video component (FFmpeg via PyAV, ~35 MB) is downloaded the first time it is
 needed, not bundled. The depth model (Apache-2.0 Depth Anything V2 Small, fp16,
-50 MB) ships in the app.
+50 MB) ships in the release zip; if it is ever missing, the app downloads it from this
+repository's `models-v1` release by itself.
 
 ## Updates
 
@@ -114,13 +162,10 @@ to the download page. That is all: nothing is downloaded or installed automatica
 be turned off (or run on demand) in Settings → Updates. It sends one anonymous request to
 `api.github.com` and does nothing at all if it cannot reach it.
 
-(The release list is only readable without a token when the repository - or the releases
-repository - is public.)
-
 ## Tests
 
 ```
-python -m pytest        # ~120 tests, about a minute, no GPU or model needed
+python -m pytest        # ~130 tests, about a minute, no GPU or model needed
 ```
 
 ## Status and known gaps
@@ -157,8 +202,9 @@ Not yet done / not yet verified — stated plainly:
 
 ```
 ultimate_video_3d/    the app        (see CLAUDE.md for a map)
-tests/                pytest + a screenshot harness
-scripts/              setup / run / build for Windows and macOS
+tests/                pytest + screenshot harnesses
+scripts/              setup / run / build for Windows and macOS, and the demo-scene generator
+docs/screenshots/     the pictures on this page
 icon/                 app icons
 ```
 
