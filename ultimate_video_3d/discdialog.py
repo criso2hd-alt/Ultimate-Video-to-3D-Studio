@@ -14,7 +14,7 @@ from pathlib import Path
 from PySide6.QtCore import QObject, Qt, QThread, QTimer, Signal
 from PySide6.QtWidgets import (
     QComboBox, QDialog, QFileDialog, QHBoxLayout, QLabel, QListWidget, QListWidgetItem, QProgressBar,
-    QPushButton, QVBoxLayout, QWidget,
+    QPushButton, QRadioButton, QVBoxLayout, QWidget,
 )
 
 from . import disc, paths
@@ -72,6 +72,43 @@ class DiscCopyWorker(QObject):
         self.finished.emit(out)
 
 
+class DiscPrepareWorker(QObject):
+    """Direct mode: cut a short preview sample out of the title and open it as a stream to convert later."""
+
+    progress = Signal(int, int)
+    finished = Signal(object)
+    stopped = Signal()
+    failed = Signal(str)
+
+    SAMPLE_SECONDS = 90.0
+    SAMPLE_FROM = 0.25                      # a quarter of the way in: past the logos, into the film
+
+    def __init__(self, title: disc.Title, label: str) -> None:
+        super().__init__()
+        self._title, self._label = title, label
+        self._stop = False
+
+    def stop(self) -> None:
+        self._stop = True
+
+    def run(self) -> None:
+        try:
+            stream = disc.DiscStream(self._title, self._label, paths.scratch_dir())
+            sample = paths.scratch_dir() / f"{stream.stem}.preview.mkv"
+            disc.copy_title(self._title, sample, self.progress.emit, lambda: self._stop,
+                            start_fraction=self.SAMPLE_FROM, max_seconds=self.SAMPLE_SECONDS)
+        except disc.Stopped:
+            self.stopped.emit()
+            return
+        except disc.DiscError as error:
+            self.failed.emit(str(error))
+            return
+        except Exception as error:  # noqa: BLE001
+            self.failed.emit(f"The disc could not be prepared: {error}")
+            return
+        self.finished.emit((stream, sample))
+
+
 def copies_dir() -> Path:
     path = paths.data_dir() / "discs"
     path.mkdir(parents=True, exist_ok=True)
@@ -97,6 +134,9 @@ class DiscDialog(QDialog):
         self.setModal(True)
         self.setMinimumWidth(560)
         self.copied: Path | None = None
+        #: Direct mode: the title to convert straight from the disc, and the short sample shown in the preview.
+        self.stream: disc.DiscStream | None = None
+        self.sample: Path | None = None
         self._folder = folder or copies_dir()
         self._titles: list[disc.Title] = []
         self._thread: QThread | None = None
@@ -132,6 +172,19 @@ class DiscDialog(QDialog):
         row.addWidget(self.browse)
         layout.addLayout(row)
 
+        self.mode_copy = QRadioButton("Copy to my disk first (recommended)")
+        self.mode_copy.setToolTip("Fast, and lossless: the disc is copied at the drive's speed. Then the disc can "
+                                  "come out, you can scrub the whole film, and you can convert it again with other "
+                                  "settings without the disc.")
+        self.mode_direct = QRadioButton("Convert straight from the disc (keeps no copy)")
+        self.mode_direct.setToolTip("Uses no extra disk space, but the disc has to stay in and is read for the whole "
+                                    "conversion. The preview shows a short sample from the film, and the whole "
+                                    "title is converted.")
+        self.mode_copy.setChecked(True)
+        self.mode_copy.toggled.connect(self._mode_changed)
+        layout.addWidget(self.mode_copy)
+        layout.addWidget(self.mode_direct)
+
         self.titles = QListWidget()
         self.titles.setMinimumHeight(170)
         self.titles.currentRowChanged.connect(self._title_changed)
@@ -154,6 +207,7 @@ class DiscDialog(QDialog):
         self.cancel.setObjectName("secondary")
         self.cancel.clicked.connect(self._cancel)
         self.copy = QPushButton("Copy and open")
+        self.copy.setToolTip("")
         self.copy.setEnabled(False)
         self.copy.clicked.connect(self._start_copy)
         buttons.addWidget(self.cancel)
@@ -218,6 +272,9 @@ class DiscDialog(QDialog):
             self.copy.setEnabled(False)
             self.status.setText(disc.PROTECTED)
 
+    def _mode_changed(self) -> None:
+        self.copy.setText("Copy and open" if self.mode_copy.isChecked() else "Prepare preview")
+
     def _title_changed(self, row: int) -> None:
         self.copy.setEnabled(0 <= row < len(self._titles) and self._thread is None)
 
@@ -234,12 +291,20 @@ class DiscDialog(QDialog):
             return
         name = f"{disc.safe_name(drive.label)} - {disc.safe_name(title.name)}.mkv"
         destination = self._folder / name
-        for control in (self.drives, self.refresh, self.browse, self.titles, self.copy):
+        direct = self.mode_direct.isChecked()
+        for control in (self.drives, self.refresh, self.browse, self.titles, self.copy,
+                        self.mode_copy, self.mode_direct):
             control.setEnabled(False)
         self.bar.setVisible(True)
         self.bar.setValue(0)
         self._started = time.monotonic()
         self.status.setText("Starting…")
+        if direct:
+            worker = DiscPrepareWorker(title, drive.label)
+            worker.progress.connect(self._progress)
+            self.status.setText("Cutting a short preview from the film…")
+            self._run(worker, done=self._prepared, stopped=self._stopped)
+            return
         worker = DiscCopyWorker(title, destination)
         worker.progress.connect(self._progress)
         self._run(worker, done=self._copied, stopped=self._stopped)
@@ -250,8 +315,14 @@ class DiscDialog(QDialog):
         rate = done / elapsed
         left = (total - done) / rate if rate > 0 and done else 0
         m, s = divmod(int(left), 60)
+        if self.mode_direct.isChecked():
+            return
         self.status.setText(f"{done / 1e9:.2f} of {total / 1e9:.2f} GB  -  {rate / 1e6:.0f} MB/s"
                             + (f"  -  about {m}:{s:02d} left" if done > total * 0.02 else ""))
+
+    def _prepared(self, result) -> None:
+        self.stream, self.sample = result
+        self.accept()
 
     def _copied(self, path) -> None:
         self.copied = Path(path)
@@ -261,7 +332,7 @@ class DiscDialog(QDialog):
         self.reject()
 
     def _cancel(self) -> None:
-        if isinstance(self._worker, DiscCopyWorker):
+        if isinstance(self._worker, (DiscCopyWorker, DiscPrepareWorker)):
             self.status.setText("Stopping…")
             self.cancel.setEnabled(False)
             self._worker.stop()                                 # the worker then emits `stopped`
@@ -269,7 +340,7 @@ class DiscDialog(QDialog):
         self.reject()
 
     def reject(self) -> None:  # noqa: D102 - Qt name; also the window's X and Escape
-        if isinstance(self._worker, DiscCopyWorker):
+        if isinstance(self._worker, (DiscCopyWorker, DiscPrepareWorker)):
             self._cancel()
             return
         self._end()
@@ -317,7 +388,7 @@ class DiscDialog(QDialog):
         self._end()
         self.bar.setVisible(False)
         self.status.setText(message)
-        for control in (self.drives, self.refresh, self.browse, self.titles):
+        for control in (self.drives, self.refresh, self.browse, self.titles, self.mode_copy, self.mode_direct):
             control.setEnabled(True)
         self.cancel.setEnabled(True)
         self._title_changed(self.titles.currentRow())

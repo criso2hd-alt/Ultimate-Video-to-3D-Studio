@@ -29,6 +29,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 SECTOR = 2048
+#: Sample starts must land on a whole DVD sector and a whole Blu-ray 6144-byte unit (both, so 6144).
+ALIGN = 6144
 #: Shorter than this is a menu, a logo or a trailer, not something to convert.
 MIN_TITLE_SECONDS = 60.0
 
@@ -310,7 +312,7 @@ def list_titles(root: Path, kind: str) -> list[Title]:
 class TitleReader:
     """A read-only, forward-only file object over a title: whole files back to back, or DVD sector runs."""
 
-    def __init__(self, title: Title, on_bytes: Callable[[int], None] | None = None) -> None:
+    def __init__(self, title: Title, on_bytes: Callable[[int], None] | None = None, skip: int = 0) -> None:
         self._on_bytes = on_bytes
         self.done = 0
         self._files = iter(title.parts)
@@ -326,6 +328,14 @@ class TitleReader:
                         self._runs.append((path, a - base, b - base))
         else:
             self._runs = [(p, 0, p.stat().st_size) for p in title.parts]
+        while skip > 0 and self._runs:                            # start part-way in (a preview sample)
+            path, a, b = self._runs[0]
+            if skip >= b - a:
+                skip -= b - a
+                self._runs.pop(0)
+            else:
+                self._runs[0] = (path, a + skip, b)
+                skip = 0
         self._index = 0
         self._handle = None
         self._left = 0
@@ -439,13 +449,89 @@ class _Retimer:
         self.end = max(self.end, out_seconds)
 
 
+def _open_title(title: Title, reader):
+    """Open a title's byte stream as a demuxer. Raises DiscError if it is not video FFmpeg can read."""
+    import av
+
+    fmt = "mpeg" if title.kind == DVD else "mpegts"
+    try:
+        source = av.open(reader, mode="r", format=fmt,
+                         options={"probesize": "20000000", "analyzeduration": "20000000"})
+    except Exception as error:  # noqa: BLE001
+        raise DiscError(_unreadable(title)) from error
+    if not source.streams.video:
+        source.close()
+        raise DiscError(_unreadable(title))
+    return source
+
+
+def _retimed(source, streams, should_stop):
+    """Yield (packet, seconds_from_start) for the given streams with timestamps that only ever count up.
+
+    Sequence-end (flush) packets, which have no timestamp, are passed through with ``None``: the decoder needs
+    them to release its last frames. The seconds are measured from the first picture, so the output starts at 0.
+    """
+    retimer = _Retimer()
+    zero = None
+    held = []                                                   # sound that arrives before the first picture
+    lead = source.streams.video[0].index
+
+    def stamp(packet):
+        base = packet.time_base or packet.stream.time_base
+        raw = float(packet.dts * base)
+        shift = retimer.offset(packet.stream.index, raw)
+        ticks = int(round(shift / float(base)))
+        packet.dts += ticks
+        if packet.pts is not None:
+            packet.pts += ticks
+        retimer.moved(float(packet.dts * base) + float((packet.duration or 0) * base))
+        return float(packet.dts * base)
+
+    for packet in source.demux(*streams):
+        if should_stop and should_stop():
+            raise Stopped
+        if packet.dts is None:
+            yield packet, None
+            continue
+        seconds = stamp(packet)
+        if zero is None:
+            if packet.stream.index != lead:
+                held.append((packet, seconds))
+                continue
+            if not packet.is_keyframe:                          # a sample can start mid-picture-group: undecodable
+                continue
+            zero = seconds
+            for early, at in held:
+                if at >= zero:                                  # sound from before the first picture is dropped
+                    yield _rebased(early, zero), at - zero
+            held.clear()
+        elif seconds < zero and packet.stream.index != lead:
+            continue
+        yield _rebased(packet, zero), seconds - zero
+
+
+def _rebased(packet, zero: float):
+    """Shift a packet so the first picture sits at time 0."""
+    base = float(packet.time_base or packet.stream.time_base)
+    ticks = int(round(zero / base))
+    packet.dts -= ticks
+    if packet.pts is not None:
+        packet.pts -= ticks
+    return packet
+
+
 def copy_title(
     title: Title,
     destination: Path,
     progress: Progress | None = None,
     should_stop: Callable[[], bool] | None = None,
+    start_fraction: float = 0.0,
+    max_seconds: float | None = None,
 ) -> Path:
-    """Copy one title to a Matroska file, streams untouched. Raises DiscError, or Stopped if cancelled."""
+    """Copy one title to a Matroska file, streams untouched. Raises DiscError, or Stopped if cancelled.
+
+    ``start_fraction`` and ``max_seconds`` take a short piece from part-way in (a preview sample) instead.
+    """
     from . import video
 
     if not video.is_available():
@@ -454,21 +540,16 @@ def copy_title(
 
     if is_scrambled(title):
         raise DiscError(PROTECTED)
-    if is_scrambled(title):
-        raise DiscError(PROTECTED)
     total = max(1, title.nbytes)
-    reader = TitleReader(title, (lambda done: progress(min(done, total), total)) if progress else None)
+    sampling = max_seconds is not None
+    if sampling:
+        total = max(1, min(total, int(title.nbytes * max_seconds / max(1.0, title.seconds or 1e9)) + (8 << 20)))
+    skip = int(title.nbytes * start_fraction) // ALIGN * ALIGN
+    reader = TitleReader(title, (lambda done: progress(min(done, total), total)) if progress else None, skip)
     partial = destination.with_name(destination.name + ".part")
     destination.parent.mkdir(parents=True, exist_ok=True)
-    fmt = "mpeg" if title.kind == DVD else "mpegts"
     try:
-        try:
-            source = av.open(reader, mode="r", format=fmt, options={"probesize": "20000000", "analyzeduration": "20000000"})
-        except Exception as error:  # noqa: BLE001
-            raise DiscError(_unreadable(title)) from error
-        with source:
-            if not source.streams.video:
-                raise DiscError(_unreadable(title))
+        with _open_title(title, reader) as source:
             with av.open(str(partial), mode="w", format="matroska") as out:
                 mapping = {}
                 for stream in source.streams:
@@ -478,20 +559,12 @@ def copy_title(
                         mapping[stream.index] = out.add_stream_from_template(stream)
                     except Exception:  # noqa: BLE001 - a stream Matroska will not take is left behind
                         continue
-                retimer = _Retimer()
-                for packet in source.demux(*[s for s in source.streams if s.index in mapping]):
-                    if should_stop and should_stop():
-                        raise Stopped
-                    if packet.dts is None or packet.stream.index not in mapping:
+                wanted = [s for s in source.streams if s.index in mapping]
+                for packet, seconds in _retimed(source, wanted, should_stop):
+                    if seconds is None or packet.stream.index not in mapping:
                         continue
-                    base = packet.time_base or packet.stream.time_base
-                    raw = float(packet.dts * base)
-                    shift = retimer.offset(packet.stream.index, raw)
-                    ticks = int(round(shift / float(base)))
-                    packet.dts += ticks
-                    if packet.pts is not None:
-                        packet.pts += ticks
-                    retimer.moved(float(packet.dts * base) + float((packet.duration or 0) * base))
+                    if sampling and seconds > max_seconds:
+                        break
                     packet.stream = mapping[packet.stream.index]
                     out.mux(packet)
     except (Stopped, DiscError):
@@ -506,6 +579,95 @@ def copy_title(
     if progress:
         progress(total, total)
     return destination
+
+
+class DiscStream:
+    """A title converted straight from the disc, without keeping a copy of it on disk.
+
+    Used in place of a file path by :func:`pipeline.convert_video`. The disc is read once, front to back:
+    :meth:`frames` decodes the picture and, in the same pass, writes the (small) soundtrack to a temporary
+    file that the pipeline muxes onto the result afterwards. Nothing here can seek, so it always converts the
+    whole title.
+    """
+
+    def __init__(self, title: Title, label: str, scratch: Path) -> None:
+        self.title = title
+        self.stem = f"{safe_name(label)} - {safe_name(title.name)}"
+        self._audio = scratch / f"{self.stem}.audio.mkv"
+        self.audio_written = False
+        self.info = self._probe()
+
+    def _probe(self):
+        from . import video
+
+        reader = TitleReader(self.title)
+        try:
+            with _open_title(self.title, reader) as source:
+                info = video.describe(source)
+        finally:
+            reader.close()
+        if self.title.seconds:
+            info.duration = self.title.seconds
+            info.frames = max(1, round(self.title.seconds * info.fps))
+        return info
+
+    @property
+    def audio_path(self) -> Path | None:
+        return self._audio if self.audio_written else None
+
+    def discard(self) -> None:
+        self.audio_written = False
+        _remove(self._audio)
+
+    def frames(self, start: int = 0, limit: int | None = None, should_stop=None, on_bytes=None):
+        """Yield (index, rgb) for every frame of the title; ``start`` and ``limit`` count from the top."""
+        import av
+
+        from . import video
+
+        self.discard()
+        total = max(1, self.title.nbytes)
+        reader = TitleReader(self.title, (lambda done: on_bytes(min(done, total), total)) if on_bytes else None)
+        out = None
+        try:
+            with _open_title(self.title, reader) as source:
+                vstream = source.streams.video[0]
+                vstream.thread_type = "AUTO"
+                sar = vstream.sample_aspect_ratio or vstream.codec_context.sample_aspect_ratio
+                high = video._bit_depth(vstream.codec_context.pix_fmt or "") > 8
+                astream = source.streams.audio[0] if source.streams.audio else None
+                a_out = None
+                if astream is not None:
+                    out = av.open(str(self._audio), mode="w", format="matroska")
+                    try:
+                        a_out = out.add_stream_from_template(astream)
+                    except Exception:  # noqa: BLE001 - not storable: convert without sound
+                        out.close()
+                        out, a_out, astream = None, None, None
+                wanted = [vstream] + ([astream] if astream is not None else [])
+                index, emitted = 0, 0
+                for packet, seconds in _retimed(source, wanted, should_stop):
+                    if packet.stream is vstream:
+                        for frame in packet.decode():
+                            if index >= start:
+                                if limit is not None and emitted >= limit:
+                                    return
+                                yield index, video.frame_to_rgb(frame, high, sar=sar)
+                                emitted += 1
+                            index += 1
+                    elif a_out is not None and seconds is not None:
+                        packet.stream = a_out
+                        out.mux(packet)
+        except Stopped:
+            return
+        finally:
+            reader.close()
+            if out is not None:
+                try:
+                    out.close()
+                    self.audio_written = True
+                except Exception:  # noqa: BLE001
+                    self.audio_written = False
 
 
 def _unreadable(title: Title) -> str:

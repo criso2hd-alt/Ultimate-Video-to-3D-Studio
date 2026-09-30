@@ -13,6 +13,7 @@ ungraded picture: a heavy grade should not change how far away things look.
 from __future__ import annotations
 
 import queue
+import shutil
 import threading
 import time
 from collections.abc import Callable, Iterator
@@ -80,7 +81,11 @@ class _Reader(threading.Thread):
 
     def run(self) -> None:
         try:
-            for item in video.frames(*self._args, should_stop=self.stop.is_set):
+            source, start, limit = self._args
+            # A title read straight from a disc has its own forward-only decoder (and collects the sound).
+            frames = (source.frames(start, limit, should_stop=self.stop.is_set) if hasattr(source, "frames")
+                      else video.frames(source, start, limit, should_stop=self.stop.is_set))
+            for item in frames:
                 while not self.stop.is_set():
                     try:
                         self._out.put(item, timeout=0.2)
@@ -205,7 +210,9 @@ def convert_video(
     if not video.is_available():
         raise RuntimeError("Video support (PyAV) has not been downloaded yet.")
 
-    info = video.probe(source)
+    # ``source`` is a file, or a disc.DiscStream (a title converted straight from the disc, nothing kept).
+    from_disc = hasattr(source, "frames")
+    info = source.info if from_disc else video.probe(source)
     export, threed = settings.export, settings.threed
     family = encoders.FAMILIES_BY_KEY[export.family]
     layout = stereo.LAYOUTS_BY_KEY[threed.layout]
@@ -298,6 +305,8 @@ def convert_video(
     writer.close()
 
     if stopped:
+        if from_disc:
+            source.discard()
         video_only.unlink(missing_ok=True)
         yield VideoProgress("stopped", done, total)
         return
@@ -306,10 +315,17 @@ def convert_video(
     trimming = start > 0 or limit is not None
     window_start = start / info.fps if trimming else 0.0
     window_len = (done / info.fps) if trimming else None
-    had_audio = video.mux_audio(
-        source, video_only, destination, window_start, window_len,
-        audio=export.audio, suffix=family.suffix,
-    )
+    audio_source = source.audio_path if from_disc else source
+    if audio_source is None:                                 # a disc title with no sound we could keep
+        shutil.copy2(video_only, destination)
+        had_audio = False
+    else:
+        had_audio = video.mux_audio(
+            audio_source, video_only, destination, window_start, window_len,
+            audio=export.audio, suffix=family.suffix,
+        )
+    if from_disc:
+        source.discard()
     video_only.unlink(missing_ok=True)
     yield VideoProgress("done", done, total,
                         message="" if had_audio else "No audio track.")

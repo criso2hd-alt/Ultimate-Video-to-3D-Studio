@@ -183,6 +183,14 @@ thread, can be cancelled, write `*.part` and rename, and check free disk space f
   reported at once instead of letting FFmpeg chew noise for a minute. The message is `disc.PROTECTED`.
 - `video.display_width`: DVD pixels are not square (32:27). `probe()` reports the display width and
   `frames()` scales to it; the preview proxy derives from `info`, so everything downstream sees the real shape.
+- Two modes in the dialog. *Copy to disk first* (default) writes the MKV above. *Convert straight from the disc*
+  keeps no copy: `disc.DiscStream` stands in for the file path in `pipeline.convert_video` (it has `.info`, `.stem`,
+  `.frames()`, `.audio_path`, `.discard()`); the disc is read once, front to back, the picture is decoded as it
+  arrives and the soundtrack is written to a small temp MKV in the same pass, muxed on at the end. It cannot seek,
+  so it always converts the whole title (the range box is disabled) and the preview is a ~90 s sample cut from a
+  quarter of the way in (`copy_title(start_fraction=, max_seconds=)`), held in `scratch/`. `page.disc_stream` is set
+  while a disc title is open; opening any file clears it.
+- Timestamps are rebased so the first keyframe sits at 0; sound before the first picture is dropped.
 - Tests use synthetic discs only (`tests/test_disc.py`); a real drive in the machine is masked in the dialog test.
 - Still to do: deinterlace and 3:2 pulldown for DVD (needs a real DVD to check), audio-track / subtitle choice,
   pause and resume for movie-length copies and conversions, Blu-ray playlists that repeat one clip (decoys).

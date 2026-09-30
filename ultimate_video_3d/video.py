@@ -113,35 +113,40 @@ def probe(path: str | Path) -> VideoInfo:
     import av
 
     with av.open(str(path)) as container:
-        if not container.streams.video:
-            raise ValueError("That file has no video stream.")
-        stream = container.streams.video[0]
-        ctx = stream.codec_context
-        rate = stream.average_rate or stream.base_rate or Fraction(24, 1)
-        duration = 0.0
-        if stream.duration and stream.time_base:
-            duration = float(stream.duration * stream.time_base)
-        elif container.duration:
-            duration = container.duration / 1_000_000
-        trc = int(getattr(ctx, "color_trc", 0) or 0)
+        return describe(container)
+
+
+def describe(container) -> VideoInfo:
+    """A video's shape from an open container (a file, or a disc title read as a stream)."""
+    if not container.streams.video:
+        raise ValueError("That file has no video stream.")
+    stream = container.streams.video[0]
+    ctx = stream.codec_context
+    rate = stream.average_rate or stream.base_rate or Fraction(24, 1)
+    duration = 0.0
+    if stream.duration and stream.time_base:
+        duration = float(stream.duration * stream.time_base)
+    elif container.duration:
+        duration = container.duration / 1_000_000
+    trc = int(getattr(ctx, "color_trc", 0) or 0)
+    rotation = 0
+    try:
+        rotation = int(round(stream.side_data.get("DISPLAYMATRIX", 0))) if hasattr(stream, "side_data") else 0
+    except Exception:  # noqa: BLE001
         rotation = 0
-        try:
-            rotation = int(round(stream.side_data.get("DISPLAYMATRIX", 0))) if hasattr(stream, "side_data") else 0
-        except Exception:  # noqa: BLE001
-            rotation = 0
-        pix_fmt = ctx.pix_fmt or ""
-        audio = container.streams.audio[0].codec_context.name if container.streams.audio else ""
-        sar = stream.sample_aspect_ratio or ctx.sample_aspect_ratio
-        return VideoInfo(
-            width=display_width(ctx.width, sar), height=ctx.height, fps=float(rate),
-            frames=stream.frames or (round(duration * float(rate)) if duration else 0),
-            has_audio=bool(container.streams.audio), duration=duration,
-            codec=ctx.name, pix_fmt=pix_fmt, bit_depth=_bit_depth(pix_fmt),
-            hdr=PQ if trc == _TRC_PQ else HLG if trc == _TRC_HLG else SDR,
-            colorspace=int(getattr(ctx, "colorspace", 0) or 0),
-            color_range=int(getattr(ctx, "color_range", 0) or 0),
-            rotation=rotation, audio_codec=audio,
-        )
+    pix_fmt = ctx.pix_fmt or ""
+    audio = container.streams.audio[0].codec_context.name if container.streams.audio else ""
+    sar = stream.sample_aspect_ratio or ctx.sample_aspect_ratio
+    return VideoInfo(
+        width=display_width(ctx.width, sar), height=ctx.height, fps=float(rate),
+        frames=stream.frames or (round(duration * float(rate)) if duration else 0),
+        has_audio=bool(container.streams.audio), duration=duration,
+        codec=ctx.name, pix_fmt=pix_fmt, bit_depth=_bit_depth(pix_fmt),
+        hdr=PQ if trc == _TRC_PQ else HLG if trc == _TRC_HLG else SDR,
+        colorspace=int(getattr(ctx, "colorspace", 0) or 0),
+        color_range=int(getattr(ctx, "color_range", 0) or 0),
+        rotation=rotation, audio_codec=audio,
+    )
 
 
 def _src_matrix(frame) -> str:

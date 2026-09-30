@@ -16,7 +16,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 av = pytest.importorskip("av")
 
-from ultimate_video_3d import disc  # noqa: E402
+from ultimate_video_3d import disc, video  # noqa: E402
 
 SECTOR = disc.SECTOR
 
@@ -268,3 +268,71 @@ def test_plain_discs_are_not_flagged_and_noise_is(dvd, bluray, tmp_path):
     assert disc.is_scrambled(title)
     with pytest.raises(disc.DiscError, match="copy-protected"):
         disc.copy_title(title, tmp_path / "o.mkv")
+
+
+def test_a_title_can_be_converted_straight_from_the_disc(dvd, tmp_path):
+    from ultimate_video_3d import encoders, pipeline, settings as settingsmod
+
+    title = disc.list_titles(dvd, disc.DVD)[0]
+    stream = disc.DiscStream(title, "MY MOVIE", tmp_path)
+    assert stream.stem == "MY MOVIE - Title 1" and stream.info.frames > 0 and stream.info.width >= 320
+    s = settingsmod.AppSettings()
+    s.export.family = "h264"
+    s.export.encoder = "libx264"
+    s.threed.enabled = True
+    dst = tmp_path / "out.mp4"
+    stages = [u.stage for u in pipeline.convert_video(stream, dst, s, gpus=[])]
+    assert stages[-1] == "done" and dst.exists()
+    info = video.probe(dst)
+    assert info.has_audio and 3.0 < info.duration < 5.0                     # two 2 s cells, picture and sound
+    assert stream.audio_path is None and not list(tmp_path.glob("*.audio.mkv"))   # temporary sound file removed
+
+
+def test_a_sample_from_part_way_in_is_short_and_starts_at_zero(dvd, tmp_path):
+    title = disc.list_titles(dvd, disc.DVD)[0]
+    out = disc.copy_title(title, tmp_path / "s.mkv", start_fraction=0.3, max_seconds=1.0)
+    with av.open(str(out)) as f:
+        dts = [float(p.dts * p.time_base) for p in f.demux(f.streams.video[0]) if p.dts is not None]
+    assert dts and dts[0] < 0.5 and 0.5 < dts[-1] - dts[0] < 1.6
+
+
+def test_dialog_direct_mode_hands_back_a_stream_and_a_short_sample(dvd, tmp_path, monkeypatch):
+    from PySide6.QtWidgets import QApplication
+
+    from ultimate_video_3d import discdialog, paths
+
+    monkeypatch.setattr(disc, "find_drives", lambda: [])
+    monkeypatch.setattr(paths, "scratch_dir", lambda: tmp_path)
+    app = QApplication.instance() or QApplication([])
+    dialog = discdialog.DiscDialog(folder=tmp_path)
+    dialog._manual.append(disc.Drive(dvd, "MY MOVIE", disc.DVD))
+    dialog.reload_drives()
+    assert _wait(app, lambda: dialog.titles.count() == 1)
+    dialog.mode_direct.setChecked(True)
+    assert dialog.copy.text() == "Prepare preview"
+    dialog.show()
+    dialog.copy.click()
+    assert _wait(app, lambda: dialog.stream is not None)
+    assert dialog.copied is None and dialog.sample.exists()
+    assert dialog.stream.info.frames > 0 and dialog.stream.stem == "MY MOVIE - Title 1"
+    dialog.close()
+
+
+def test_main_window_converts_a_disc_title_whole_and_names_the_file_after_the_disc(dvd, tmp_path, monkeypatch):
+    from ultimate_video_3d import app as appmod
+
+    monkeypatch.setattr(appmod.paths, "settings_path", lambda: tmp_path / "settings.json")
+    app = appmod.QApplication.instance() or appmod.QApplication([])
+    window = appmod.MainWindow()
+    try:
+        title = disc.list_titles(dvd, disc.DVD)[0]
+        stream = disc.DiscStream(title, "MY MOVIE", tmp_path)
+        sample = disc.copy_title(title, tmp_path / "s.mkv", start_fraction=0.0, max_seconds=1.5)
+        window._open_disc_stream(stream, sample)
+        page = window.video_page
+        assert page.disc_stream is stream and not page.export.range_box.isEnabled()
+        assert page.output_path.name.startswith("MY MOVIE - Title 1")
+        window._open_path(sample)                                           # opening a plain file leaves disc mode
+        assert page.disc_stream is None and page.export.range_box.isEnabled()
+    finally:
+        window.close()

@@ -420,6 +420,7 @@ class VideoPage(QWidget):
     def __init__(self, settings: AppSettings, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self.source: Path | None = None
+        self.disc_stream = None                 # a title converted straight from a disc (source is then its preview sample)
         self.info: video.VideoInfo | None = None
         self.output_path: Path | None = None
 
@@ -1479,8 +1480,29 @@ class MainWindow(QMainWindow):
             return
         dialog = DiscDialog(self)
         dialog.setStyleSheet(style_for(self.settings.theme))
-        if dialog.exec() and dialog.copied is not None:
+        if not dialog.exec():
+            return
+        if dialog.copied is not None:
             self._open_path(dialog.copied)
+        elif dialog.stream is not None and dialog.sample is not None:
+            self._open_disc_stream(dialog.stream, dialog.sample)
+
+    def _open_disc_stream(self, stream, sample: Path) -> None:
+        """Direct mode: the picture is a short sample from the film; Convert reads the whole title from the disc."""
+        self._open_path(sample)
+        page = self.video_page
+        if page.source != sample:                       # the sample could not be opened
+            return
+        page.disc_stream = stream
+        page.source_label.setText(f"Disc: {stream.stem}")
+        page.info_label.setText(
+            f"{stream.info.describe()}\nThe preview is a short sample; Convert reads the whole title from the disc, "
+            "so leave the disc in.")
+        page.export.range_box.setCurrentIndex(max(0, page.export.range_box.findData("whole")))
+        page.export.range_box.setEnabled(False)
+        page.export.range_box.setToolTip("A title converted straight from the disc is always converted whole.")
+        self._refresh_output_name()
+        self.status.showMessage("Disc ready: adjust the 3D and colour on the sample, then press Convert.")
 
     def _open_path(self, path: Path) -> None:
         if self._converting:
@@ -1495,6 +1517,9 @@ class MainWindow(QMainWindow):
             return
         page = self.video_page
         page.source, page.info = path, info
+        page.disc_stream = None
+        page.export.range_box.setEnabled(True)
+        page.export.range_box.setToolTip("")
         self.settings.last_video_dir = str(path.parent)
         page.source_label.setText(path.name)
         page.info_label.setText(info.describe())
@@ -1517,7 +1542,8 @@ class MainWindow(QMainWindow):
         if page.source is None:
             return
         folder = page.output_path.parent if page.output_path else None
-        page.output_path = pipeline.output_path_for(page.source, self.settings, folder)
+        named = Path(page.disc_stream.stem + ".mkv") if page.disc_stream is not None else page.source
+        page.output_path = pipeline.output_path_for(named, self.settings, folder)
         page.output_label.setText(f"Output: {page.output_path}")
 
     def _pick_output(self) -> None:
@@ -1584,7 +1610,7 @@ class MainWindow(QMainWindow):
         page.show_preview()
         settings = copy.deepcopy(self.settings)
         start, limit = 0, None
-        if settings.export.range_mode == "range":
+        if settings.export.range_mode == "range" and page.disc_stream is None:
             in_frame, out_frame = page.timeline.in_out()
             start, limit = in_frame, max(1, out_frame - in_frame + 1)
         page.start.setEnabled(False)
@@ -1594,12 +1620,13 @@ class MainWindow(QMainWindow):
         page.stop.setVisible(True)
         page.bar.setVisible(True)
         page.bar.setValue(0)
-        total = limit if limit is not None else (page.info.frames if page.info else 0)
+        whole = page.disc_stream.info.frames if page.disc_stream is not None else (page.info.frames if page.info else 0)
+        total = limit if limit is not None else whole
         page.bar.setMaximum(total or 0)
         self._eta = _EtaTracker()
 
         self._thread = QThread(self)
-        self._worker = ConvertWorker(page.source, page.output_path, settings, start, limit, self.gpus)
+        self._worker = ConvertWorker(page.disc_stream or page.source, page.output_path, settings, start, limit, self.gpus)
         self._worker.moveToThread(self._thread)
         self._thread.started.connect(self._worker.run)
         self._worker.progress.connect(self.status.showMessage)
