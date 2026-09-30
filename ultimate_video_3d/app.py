@@ -38,6 +38,7 @@ from PySide6.QtWidgets import (
 )
 
 from .discdialog import DiscDialog
+from . import resume as resumemod
 from . import APP_TITLE, __version__, bootstrap, cloud, models, onboarding, support, updates, depth as depthmod, encoders, paths, pipeline, stereo, sysinfo, video, warmup
 from .controls import PreviewView, SystemGauge
 from .panels import ColourPanel, ExportPanel, LutPanel, ThreeDPanel, open_folder
@@ -211,14 +212,15 @@ class ConvertWorker(QObject):
     progress = Signal(str)
     frame_done = Signal(object)
     finished = Signal(object)
-    stopped = Signal()
+    stopped = Signal(int, int, bool)          # frames done, total frames, whether it can be resumed
     failed = Signal(str)
 
     def __init__(self, source: Path, destination: Path, settings: AppSettings, start: int,
-                 limit: int | None, gpus: list) -> None:
+                 limit: int | None, gpus: list, resume: bool = False) -> None:
         super().__init__()
         self._args = (source, destination, settings, start, limit)
         self._gpus = gpus
+        self._resume = resume
         self._stop = False
 
     def stop(self) -> None:
@@ -229,10 +231,10 @@ class ConvertWorker(QObject):
         try:
             for update in pipeline.convert_video(
                 source, destination, settings, start, limit, self.progress.emit,
-                lambda: self._stop, self._gpus,
+                lambda: self._stop, self._gpus, self._resume,
             ):
                 if update.stage == "stopped":
-                    self.stopped.emit()
+                    self.stopped.emit(update.index, update.total, update.message == "paused")
                     return
                 self.frame_done.emit(update)
         except Exception as error:  # noqa: BLE001 - the UI is the error handler
@@ -1340,6 +1342,7 @@ class MainWindow(QMainWindow):
     # -- first-run setup ---------------------------------------------------
 
     def _start_initial_setup(self) -> None:
+        resumemod.cleanup_stale()                        # paused conversions nobody came back to
         warmup.start(self.settings.force_cpu_depth)      # kernels and the depth model, once per launch
         self.gpus = sysinfo.detect_gpus()
         primary = sysinfo.primary_gpu(self.gpus)
@@ -1605,14 +1608,23 @@ class MainWindow(QMainWindow):
             if page.output_path is None:
                 return
 
-        self.player.pause()
-        self._converting = True
-        page.show_preview()
         settings = copy.deepcopy(self.settings)
         start, limit = 0, None
         if settings.export.range_mode == "range" and page.disc_stream is None:
             in_frame, out_frame = page.timeline.in_out()
             start, limit = in_frame, max(1, out_frame - in_frame + 1)
+        resume = False
+        if page.disc_stream is None:
+            answer = self._ask_resume(page, settings, start, limit)
+            if answer is None:
+                return
+            resume = answer
+        self.player.pause()
+        self._converting = True
+        page.show_preview()
+        page.stop.setText("Stop" if page.disc_stream is not None else "Pause")
+        page.stop.setToolTip("" if page.disc_stream is not None else
+                             "Keeps what is converted so far. Press Convert again to carry on from there.")
         page.start.setEnabled(False)
         page.pick_video.setEnabled(False)
         page.pick_disc.setEnabled(False)
@@ -1626,7 +1638,7 @@ class MainWindow(QMainWindow):
         self._eta = _EtaTracker()
 
         self._thread = QThread(self)
-        self._worker = ConvertWorker(page.disc_stream or page.source, page.output_path, settings, start, limit, self.gpus)
+        self._worker = ConvertWorker(page.disc_stream or page.source, page.output_path, settings, start, limit, self.gpus, resume)
         self._worker.moveToThread(self._thread)
         self._thread.started.connect(self._worker.run)
         self._worker.progress.connect(self.status.showMessage)
@@ -1636,10 +1648,35 @@ class MainWindow(QMainWindow):
         self._worker.failed.connect(self._failed)
         self._thread.start()
 
+    def _ask_resume(self, page, settings: AppSettings, start: int, limit: int | None) -> bool | None:
+        """True to resume an earlier paused run of this same job, False to start fresh, None to cancel."""
+        total = limit if limit is not None else max(0, (page.info.frames if page.info else 0) - start)
+        try:
+            left = resumemod.find(page.source, settings, start, limit, total)
+        except Exception:  # noqa: BLE001 - a damaged state is the same as none
+            left = None
+        if left is None:
+            return False
+        box = QMessageBox(QMessageBox.Icon.Question, "Continue this conversion?",
+                          f"This conversion was paused at {left.percent}%.\n\nContinue from there, or start over?",
+                          parent=self)
+        go_on = box.addButton("Continue", QMessageBox.ButtonRole.AcceptRole)
+        again = box.addButton("Start over", QMessageBox.ButtonRole.DestructiveRole)
+        box.addButton("Cancel", QMessageBox.ButtonRole.RejectRole)
+        box.setDefaultButton(go_on)
+        box.exec()
+        if box.clickedButton() is go_on:
+            return True
+        if box.clickedButton() is again:
+            left.clear()
+            return False
+        return None
+
     def _stop_convert(self) -> None:
         if self._worker is not None:
             self._worker.stop()
-            self.video_page.info_label.setText("Stopping after this frame…")
+            self.video_page.info_label.setText("Pausing…" if self.video_page.disc_stream is None
+                                               else "Stopping after this frame…")
 
     def _frame_done(self, update) -> None:
         page = self.video_page
@@ -1684,9 +1721,14 @@ class MainWindow(QMainWindow):
         if box.clickedButton() is reveal:
             open_folder(output.parent)
 
-    def _was_stopped(self) -> None:
+    def _was_stopped(self, done: int = 0, total: int = 0, resumable: bool = False) -> None:
         self._teardown()
-        self.video_page.info_label.setText("Stopped.")
+        if resumable and total:
+            text = f"Paused at {round(100 * done / total)}%. Press Convert to continue from there."
+        else:
+            text = "Stopped."
+        self.video_page.info_label.setText(text)
+        self.status.showMessage(text)
 
     def _failed(self, message: str) -> None:
         self._teardown()

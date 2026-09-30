@@ -192,6 +192,16 @@ thread, can be cancelled, write `*.part` and rename, and check free disk space f
   while a disc title is open; opening any file clears it.
 - Timestamps are rebased so the first keyframe sits at 0; sound before the first picture is dropped.
 - Tests use synthetic discs only (`tests/test_disc.py`); a real drive in the machine is masked in the dialog test.
+**Pause and resume** (`resume.py`, `video.SegmentedWriter` / `join_segments`, `pipeline.convert_video(resume=)`):
+the video is encoded as segments (`SEGMENT_FRAMES`, ~1 min each) in `scratch/resume/<job key>/`, with a `state.json`
+listing the finished ones. Pause = close the open segment at once (so nothing encoded is lost), keep the folder,
+yield `stopped` with message `paused`. Convert again on the same file/range/settings finds it (`resume.find`,
+the key hashes path+size+mtime, range, and every export/3D/colour setting) and the window asks Continue / Start
+over / Cancel (`MainWindow._ask_resume`). Resuming re-reads `PREROLL` frames before the resume point so the depth
+smoothing has settled, then writes only new frames; at the end the segments are joined by copying packets
+(`join_segments` keeps decode times strictly rising - a two-frame segment has no B-frame delay). A different
+encoder than the one that made the segments discards them. Errors also keep progress. Disc-direct conversions
+never resume (forward-only). Stale jobs (>14 days) are swept at launch. The Stop button reads "Pause" for files.
 - Still to do: deinterlace and 3:2 pulldown for DVD (needs a real DVD to check), audio-track / subtitle choice,
   pause and resume for movie-length copies and conversions, Blu-ray playlists that repeat one clip (decoys).
 

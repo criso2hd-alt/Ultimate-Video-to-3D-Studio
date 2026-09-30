@@ -24,6 +24,7 @@ import cv2
 import numpy as np
 
 from . import depth as depthmod
+from . import resume as resumemod
 from . import encoders, grade, hdr, paths, stereo, sysinfo, video
 from .settings import AppSettings
 
@@ -201,8 +202,14 @@ def convert_video(
     progress: Progress | None = None,
     should_stop: Callable[[], bool] | None = None,
     gpus: list[sysinfo.GpuInfo] | None = None,
+    resume: bool = False,
 ) -> Iterator[VideoProgress]:
-    """Convert ``source`` to ``destination``; yields progress, then a final done."""
+    """Convert ``source`` to ``destination``; yields progress, then a final done.
+
+    The video is encoded in segments (see ``resume.py``). Stopping keeps the finished ones and yields
+    ``"stopped"``; calling again with ``resume=True`` and the same file, range and settings carries on from
+    there. With ``resume=False`` any earlier unfinished run of this job is discarded first.
+    """
     from . import support
 
     support.require_intact()                       # see support.py: a modified copy does not convert
@@ -243,28 +250,48 @@ def convert_video(
     video_only = scratch / f"{source.stem}.video_only{family.suffix}"
     destination.parent.mkdir(parents=True, exist_ok=True)
 
-    writer = video.VideoWriter(
-        video_only, family, encoder, info.fps, (out_w, out_h), export.quality, profile,
-        hdr=signal, stereo_mode=layout.stereo_mode if threed.enabled else "",
+    # Where an earlier run got to. A title read from a disc cannot seek, so it never resumes.
+    if from_disc:
+        state = resumemod.ResumeState(scratch / "resume" / f"disc-{source.stem}", str(source.stem), total)
+        state.clear()
+    else:
+        state = resumemod.open_state(source, settings, start, limit, total)
+        if not resume or (state.segments and state.encoder != encoder):
+            state.clear()                    # not asked for, or the segments came from a different encoder
+    state.total, state.encoder = total, encoder
+    base = state.frames_done                 # frames already encoded by earlier runs
+    first = start + base
+    preroll = min(resumemod.PREROLL, first - start) if base else 0
+    read_from = first - preroll              # a few frames earlier, so the depth smoothing has settled
+    read_limit = None if limit is None else limit - base + preroll
+    if base and limit is not None and base >= limit:
+        read_limit = 0                       # everything was already encoded: only the join is left
+
+    writer = video.SegmentedWriter(
+        state, family, encoder, info.fps, (out_w, out_h), export.quality, profile, signal,
+        layout.stereo_mode if threed.enabled else "", resumemod.SEGMENT_FRAMES,
     )
     async_writer = _Writer(writer)
     async_writer.start()
     yield VideoProgress("starting", total=total, encoder=encoder,
-                        message=f"Encoding with {encoders.encoder_label(encoder)}")
+                        message=(f"Resuming at {round(100 * base / total)}% with " if base and total else
+                                 "Encoding with ") + encoders.encoder_label(encoder))
 
     grader = grade.GradeEngine()
     params = threed.params()
     bits = 16 if writer.ten_bit else 8
 
     frames_queue: queue.Queue = queue.Queue(maxsize=4)
-    reader = _Reader(source, start, limit, frames_queue)
+    reader = _Reader(source, read_from, read_limit, frames_queue)
     depth_queue: queue.Queue = queue.Queue(maxsize=3)
     depth_stage = _DepthStage(frames_queue, depth_queue, settings, info, src_transfer,
                               signal, (eye_w, eye_h), say)
     reader.start()
     depth_stage.start()
 
-    done = 0
+    done = base
+    produced = 0
+    skip = preroll
     began = time.monotonic()
     stopped = False
     try:
@@ -277,6 +304,9 @@ def convert_video(
             if should_stop is not None and should_stop():
                 stopped = True
                 break
+            if skip > 0:
+                skip -= 1                    # warm-up frames before the resume point: not written again
+                continue
             frame, steady = item
             d = None
             if steady is not None:
@@ -290,26 +320,36 @@ def convert_video(
 
             async_writer.submit(packed)
             done += 1
+            produced += 1
             elapsed = max(time.monotonic() - began, 1e-3)
             preview = None
             if done % 3 == 0:
                 preview = _shrink(packed.astype(np.float32) / (255.0 if bits == 8 else 65535.0), 640)
-            yield VideoProgress("converting", done, total, done / elapsed, preview, encoder)
+            yield VideoProgress("converting", done, total, produced / elapsed, preview, encoder)
     finally:
         reader.stop.set()
         depth_stage.stop.set()
         async_writer.queue.put(None)
         async_writer.join()
+        try:
+            writer.close()                   # registers the open segment, so even a failure keeps its progress
+        except Exception:  # noqa: BLE001 - the first error is the one worth reporting
+            if not async_writer.error:
+                raise
     if async_writer.error:
         raise async_writer.error
-    writer.close()
 
     if stopped:
         if from_disc:
             source.discard()
-        video_only.unlink(missing_ok=True)
-        yield VideoProgress("stopped", done, total)
+            state.clear()
+        else:
+            state.save()
+        yield VideoProgress("stopped", done, total, message="paused" if not from_disc else "")
         return
+
+    yield VideoProgress("muxing", done, total, message="Joining the pieces…")
+    video.join_segments(state.files(), [s.frames for s in state.segments], info.fps, video_only, family)
 
     yield VideoProgress("muxing", done, total, message="Adding audio…")
     trimming = start > 0 or limit is not None
@@ -327,6 +367,7 @@ def convert_video(
     if from_disc:
         source.discard()
     video_only.unlink(missing_ok=True)
+    state.clear()
     yield VideoProgress("done", done, total,
                         message="" if had_audio else "No audio track.")
 

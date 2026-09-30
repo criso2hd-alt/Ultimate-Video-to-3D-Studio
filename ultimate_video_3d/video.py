@@ -349,6 +349,99 @@ class VideoWriter:
         self._container.close()
 
 
+class SegmentedWriter:
+    """A :class:`VideoWriter` that writes the video as a series of small files (see ``resume.py``).
+
+    A segment is closed and registered in the resume state every ``segment_frames`` frames, and again on
+    :meth:`close`, however early that is, so a paused job keeps everything it has encoded. The next segment
+    opens on the next frame, so nothing is created that would stay empty.
+    """
+
+    def __init__(self, state, family: encoders.Family, encoder: str, fps: float, size: tuple[int, int],
+                 quality: int, profile, hdr: str, stereo_mode: str, segment_frames: int) -> None:
+        self._state, self._family = state, family
+        self._args = (encoder, fps, size, quality, profile, hdr, stereo_mode)
+        self._limit = max(1, segment_frames)
+        self._writer: VideoWriter | None = None
+        self._path: Path | None = None
+        self._count = 0
+        self._open()                                 # the first one now, so ten_bit and the encoder are known
+        self.encoder_used = self._writer.encoder_used
+        self._ten_bit = self._writer.ten_bit
+
+    def _open(self) -> None:
+        self._path = self._state.next_segment_path(self._family.suffix)
+        self._state.folder.mkdir(parents=True, exist_ok=True)
+        encoder, fps, size, quality, profile, hdr, stereo_mode = self._args
+        self._writer = VideoWriter(self._path, self._family, encoder, fps, size, quality, profile, hdr=hdr,
+                                   stereo_mode=stereo_mode)
+        self._count = 0
+
+    @property
+    def ten_bit(self) -> bool:
+        return self._ten_bit
+
+    def write(self, rgb: np.ndarray) -> None:
+        if self._writer is None:
+            self._open()
+        self._writer.write(rgb)
+        self._count += 1
+        if self._count >= self._limit:
+            self._finish()
+
+    def _finish(self) -> None:
+        writer, path, count = self._writer, self._path, self._count
+        self._writer = None
+        if writer is None:
+            return
+        try:
+            writer.close()
+        except Exception:  # noqa: BLE001 - an encoder that never got a frame has nothing to flush
+            if count:
+                raise
+        self._state.add(path, count)
+
+    def close(self) -> None:
+        self._finish()
+
+
+def join_segments(files: list[Path], counts: list[int], fps: float, destination: Path,
+                  family: encoders.Family) -> None:
+    """Put the segments end to end in one file by copying their packets (no re-encoding)."""
+    import av
+
+    if len(files) == 1:
+        shutil.copy2(files[0], destination)
+        return
+    with av.open(str(destination), mode="w", options=_container_options(family)) as out:
+        out_stream = None
+        before = 0
+        last = None
+        for path, count in zip(files, counts):
+            with av.open(str(path)) as segment:
+                stream = segment.streams.video[0]
+                if out_stream is None:
+                    out_stream = out.add_stream_from_template(stream)
+                    for key, value in dict(stream.metadata).items():
+                        out_stream.metadata[key] = value      # e.g. the Matroska stereo_mode tag
+                for packet in segment.demux(stream):
+                    if packet.dts is None:
+                        continue
+                    ticks = round(before / fps / float(packet.time_base))
+                    packet.dts += ticks
+                    if packet.pts is not None:
+                        packet.pts += ticks
+                    # Segments differ in how far decode order leads display order (a two-frame one has no
+                    # B-frames), so a piece's first decode time can land at or before the last one's. Muxers
+                    # need strictly rising decode times: nudge by a tick or two, never enough to see.
+                    if last is not None and packet.dts <= last:
+                        packet.dts = last + 1
+                    last = packet.dts
+                    packet.stream = out_stream
+                    out.mux(packet)
+            before += count
+
+
 def _container_options(family: encoders.Family) -> dict[str, str]:
     if family.suffix in (".mp4", ".mov"):
         return {"movflags": "faststart"}
