@@ -289,25 +289,36 @@ def guided_filter(guide: np.ndarray, src: np.ndarray, radius: int, eps: float) -
     return box(a) * guide + box(b)
 
 
-def refine(depth: np.ndarray, frame_rgb: np.ndarray, edge_aware: bool = True,
-           blur: float = 0.0) -> np.ndarray:
-    """Depth at the frame's own resolution, its edges snapped to the picture's.
+#: Working width of the refinement. The preview uses the small one; an export can afford the larger.
+REFINE_FAST, REFINE_HIGH = 640, 960
 
-    The network's output is a soft 518 px map. Stretched to 1080p and used as-is,
-    the depth edge lands a few pixels off the picture edge, and every stereo
-    warp then tears a halo around each near object. A guided filter pulls the
-    depth boundary onto the luminance boundary, which is the single biggest
-    visible-quality gain after the model itself.
+
+def refine(depth: np.ndarray, frame_rgb: np.ndarray, edge_aware: bool = True,
+           blur: float = 0.0, work: int = REFINE_FAST) -> np.ndarray:
+    """Depth at the frame's own resolution, flat inside objects and clean at their outlines.
+
+    The network's output is a soft 518 px map. Stretched to 1080p and used as-is, the depth edge lands a few
+    pixels off the picture edge, and every stereo warp then tears a halo around each near object. So the map
+    is pulled onto the picture's outlines with a guided filter. Doing that alone is not enough: steered by the
+    picture only, the filter also drags in every bit of *texture* (carpet, cloth folds, hair), and the depth
+    comes out mottled with ragged, haloed silhouettes. Hence three steps, in this order:
+
+    1. a median filter kills single-pixel speckle;
+    2. a filter steered by the depth itself flattens each object while keeping the steps between objects;
+    3. a small-radius filter steered by the picture then snaps just the outline to the image's edge.
+
+    ``work`` is the width this runs at (REFINE_FAST in the live preview, REFINE_HIGH for an export).
     """
     height, width = frame_rgb.shape[:2]
-    work_w = min(width, 640)
+    work_w = min(width, work)
     work_h = max(1, round(height * work_w / width))
-    guide = cv2.cvtColor(cv2.resize(frame_rgb, (work_w, work_h), interpolation=cv2.INTER_AREA),
-                         cv2.COLOR_RGB2GRAY)
     small = cv2.resize(depth, (work_w, work_h), interpolation=cv2.INTER_CUBIC)
     if edge_aware:
-        radius = max(2, work_w // 160)
-        small = guided_filter(guide, small, radius, 2e-3)
+        guide = cv2.cvtColor(cv2.resize(frame_rgb, (work_w, work_h), interpolation=cv2.INTER_AREA),
+                             cv2.COLOR_RGB2GRAY)
+        small = cv2.medianBlur((np.clip(small, 0.0, 1.0) * 255.0).astype(np.uint8), 5).astype(np.float32) / 255.0
+        small = guided_filter(small, small, max(2, work_w // 120), 2e-3)
+        small = guided_filter(guide, small, max(2, work_w // 320), 4e-3)
     if blur > 0.0:
         small = cv2.GaussianBlur(small, (0, 0), blur * work_w / 480.0)
     small = np.clip(small, 0.0, 1.0)

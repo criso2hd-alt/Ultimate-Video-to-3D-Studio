@@ -698,3 +698,20 @@ def test_conversion_refuses_to_start_if_the_banner_data_was_edited(monkeypatch, 
     monkeypatch.setattr(support, "DIGEST", "0" * 64)
     with pytest.raises(RuntimeError, match="modified"):
         next(pipeline.convert_video(tmp_path / "a.mp4", tmp_path / "b.mp4", settingsmod.AppSettings()))
+
+
+def test_depth_refinement_is_flat_inside_objects_but_keeps_the_outline():
+    """Texture in the picture must not leak into the depth (it made mottled maps and ragged halos)."""
+    from ultimate_video_3d import depth as depthmod
+
+    rng = np.random.default_rng(5)
+    h, w = 360, 640
+    frame = np.clip(0.5 + 0.25 * rng.standard_normal((h, w, 3)), 0, 1).astype(np.float32)   # heavy texture everywhere
+    depth = np.zeros((518, 518), np.float32)
+    depth[130:400, 160:360] = 0.8                                                       # one near object
+    out = depthmod.refine(depth, frame, True, 0.0)
+    inside = out[130:240, 250:390]                                                      # well inside it (rows 90-278, cols 198-445 at this size)
+    assert inside.std() < 0.02                                                           # flat, not mottled
+    assert out[180, 100] < 0.1 and out[180, 300] > 0.7                                   # outline still where it was
+    assert out.shape == (h, w) and out.dtype == np.float32
+    assert depthmod.refine(depth, frame, True, 0.0, depthmod.REFINE_HIGH).shape == (h, w)

@@ -365,6 +365,17 @@ class ThreeDPanel(ModuleCard):
         self.edge.setChecked(s.edge_aware)
         self.edge.setToolTip("Aligns the depth map's edges with the image's edges. Removes halos around people.")
         self.edge.toggled.connect(lambda on: self._set("edge_aware", on))
+        self.quality = QComboBox()
+        self.quality.addItem("High (cleaner depth)", "high")
+        self.quality.addItem("Fast", "fast")
+        self.quality.setCurrentIndex(max(0, self.quality.findData(s.depth_quality)))
+        self.quality.setToolTip("How carefully the depth map is cleaned when converting. High is a little slower. "
+                                "The live preview always uses Fast, so it stays responsive.")
+        self.quality.currentIndexChanged.connect(lambda: self._set("depth_quality", self.quality.currentData()))
+        self.quality_row = QWidget()                      # a layout cannot be shown/hidden with the Advanced toggle
+        row = _row("Depth quality", self.quality)
+        row.setContentsMargins(0, 0, 0, 0)
+        self.quality_row.setLayout(row)
         self.swap = QCheckBox("Swap left / right eyes")
         self.swap.setChecked(s.swap_eyes)
         self.swap.setToolTip("If the depth looks inside-out, or for cross-eyed viewing.")
@@ -375,7 +386,7 @@ class ThreeDPanel(ModuleCard):
         self.advanced.setCheckable(True)
         self.advanced.toggled.connect(self._advanced)
         self.add(self.advanced)
-        self._adv_widgets = [self.near, self.far, self.temporal, self.blur, self.edge, self.swap]
+        self._adv_widgets = [self.near, self.far, self.temporal, self.blur, self.edge, self.quality_row, self.swap]
         for widget in self._adv_widgets:
             self.add(widget)
             widget.setVisible(False)

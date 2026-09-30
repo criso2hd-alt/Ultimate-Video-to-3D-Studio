@@ -125,6 +125,13 @@ Things that each cost a debugging session:
 - The histogram scales by the 98.5th percentile of the interior bins, not the tallest: a
   letterboxed frame puts a third of its pixels in bin 0 and flattened everything else to a sliver.
 
+- **Depth refinement** (`depth.refine`): median -> depth-steered guided filter (flattens each object) -> small
+  picture-steered guided filter (snaps only the outline). The old single picture-steered filter dragged texture
+  (carpet, cloth, hair) into the depth: mottled maps and ragged haloed silhouettes, visibly worse than a
+  paid competitor's smooth depth on the same clip. `work` is its width: `REFINE_FAST` (640, the live preview) or
+  `REFINE_HIGH` (960, exports when `ThreeDSettings.depth_quality == "high"`, the default; +~25 ms/frame).
+  Tuned by eye on sample frames with people; do not swap the filter order without re-checking silhouettes.
+
 ## Conventions
 
 - Python 3.12, PySide6, `from __future__ import annotations` everywhere.
