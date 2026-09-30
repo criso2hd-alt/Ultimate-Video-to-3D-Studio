@@ -142,3 +142,28 @@ def test_can_stop_midway(tmp_path, monkeypatch):
 
     stages = [u.stage for u in pipeline.convert_video(clip, tmp_path / "o.mp4", s, should_stop=stop, gpus=[])]
     assert stages[-1] == "stopped" and not (tmp_path / "o.mp4").exists()
+
+
+def test_wide_pixels_are_shown_at_their_true_width(tmp_path):
+    """A DVD stores 720 x 480 with pixels wider than tall; everything downstream must see the real shape."""
+    clip = tmp_path / "anamorphic.mkv"
+    with av.open(str(clip), "w") as out:
+        stream = out.add_stream("libx264", rate=24)
+        stream.width, stream.height, stream.pix_fmt = 360, 240, "yuv420p"
+        stream.codec_context.sample_aspect_ratio = Fraction(2, 1)
+        for i in range(6):
+            frame = av.VideoFrame.from_ndarray(np.full((240, 360, 3), 40 * i, np.uint8), format="rgb24")
+            for packet in stream.encode(frame):
+                out.mux(packet)
+        for packet in stream.encode():
+            out.mux(packet)
+    info = video.probe(clip)
+    assert (info.width, info.height) == (720, 240)
+    _, rgb = next(video.frames(clip, limit=1))
+    assert rgb.shape[:2] == (240, 720)
+
+
+def test_square_pixels_are_left_alone():
+    assert video.display_width(1920, None) == 1920
+    assert video.display_width(1920, Fraction(1, 1)) == 1920
+    assert video.display_width(720, Fraction(32, 27)) == 854

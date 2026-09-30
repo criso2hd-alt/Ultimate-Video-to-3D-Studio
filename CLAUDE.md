@@ -169,10 +169,24 @@ Source-available, **not** open source (see `LICENSE`): free to use, but no resal
 no redistribution, no reuse of the code elsewhere. Depth Anything V2 **Small** is
 Apache-2.0 and is what ships; Base/Large are CC-BY-NC - do not bundle them.
 
-## Planned for 0.2: macOS, and copying your own discs to a file first
+## 0.2 work in progress (branch `0.2-dev`)
 
-macOS is written but untested (0.2 will test it on an Apple Silicon MacBook Pro). The Source card already
-shows a disabled "Choose external disc (coming soon)" button (`VideoPage.pick_disc`): the disc is first
-copied/re-encoded to a file on disk as fast as the drive allows, and the normal pipeline then runs on that
-file. Work list: drive detection, title picker, DVD deinterlace / anamorphic SAR / pulldown, audio-track and
-subtitle choice (MKV output), pause and resume for movie-length jobs, disk-space check before copying.
+**Disc import** - the Source card's "Choose external disc..." button opens `discdialog.DiscDialog`:
+pick a drive (or a folder that holds VIDEO_TS / BDMV), pick a title (longest first), and `disc.copy_title`
+stream-copies it to `data/discs/<label> - Title N.mkv` (no re-encode: fast, lossless), which is then opened like
+any file. `disc.py` is pure Python: DVD titles come from the `VTS_nn_0.IFO` program-chain tables (cells = sector
+runs; decoy and short chains dropped), Blu-ray titles from `BDMV/PLAYLIST/*.mpls`. Copies run on a worker
+thread, can be cancelled, write `*.part` and rename, and check free disk space first.
+- Disc clocks restart at every cell / clip; `_Retimer` keeps timestamps rising. Each stream tracks its own
+  place among the restarts because picture runs ahead of sound in the file (a single global shift broke this).
+- `disc.is_scrambled` looks at the first 4 MB (TS sync bytes / DVD scramble flag); a scrambled title is
+  reported at once instead of letting FFmpeg chew noise for a minute. The message is `disc.PROTECTED`.
+- `video.display_width`: DVD pixels are not square (32:27). `probe()` reports the display width and
+  `frames()` scales to it; the preview proxy derives from `info`, so everything downstream sees the real shape.
+- Tests use synthetic discs only (`tests/test_disc.py`); a real drive in the machine is masked in the dialog test.
+- Still to do: deinterlace and 3:2 pulldown for DVD (needs a real DVD to check), audio-track / subtitle choice,
+  pause and resume for movie-length copies and conversions, Blu-ray playlists that repeat one clip (decoys).
+
+## Planned for 0.2: macOS
+
+macOS is written but untested (0.2 will test it on an Apple Silicon MacBook Pro).

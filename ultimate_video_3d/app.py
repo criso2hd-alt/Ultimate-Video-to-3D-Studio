@@ -37,6 +37,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from .discdialog import DiscDialog
 from . import APP_TITLE, __version__, bootstrap, cloud, models, onboarding, support, updates, depth as depthmod, encoders, paths, pipeline, stereo, sysinfo, video, warmup
 from .controls import PreviewView, SystemGauge
 from .panels import ColourPanel, ExportPanel, LutPanel, ThreeDPanel, open_folder
@@ -487,13 +488,12 @@ class VideoPage(QWidget):
         # -- rail
         source_card = ModuleCard("Source")
         self.pick_video = QPushButton("Choose video file…")
-        # Reserved for version 0.2: ripping a DVD / Blu-ray you own into a file first, then converting
-        # that. Shown now so the source strip is final; it does nothing yet.
-        self.pick_disc = QPushButton("Choose external disc (coming soon)")
+        # Copies a DVD / Blu-ray from your own drive to a video file first (discdialog.py), then that file
+        # is opened like any other.
+        self.pick_disc = QPushButton("Choose external disc…")
         self.pick_disc.setObjectName("secondary")
-        self.pick_disc.setEnabled(False)
         self.pick_disc.setToolTip(
-            "Coming in version 0.2: copy a DVD or Blu-ray from your own drive to a video file, "
+            "Copy a DVD or Blu-ray from your own drive to a video file on this computer, "
             "then turn it into 3D.")
         self.source_label = ElidedLabel("No video chosen")
         self.source_label.setObjectName("hint")
@@ -1055,6 +1055,7 @@ class MainWindow(QMainWindow):
     def _wire(self) -> None:
         page = self.video_page
         page.pick_video.clicked.connect(self.pick_video)
+        page.pick_disc.clicked.connect(self.pick_disc)
         page.pick_output.clicked.connect(self._pick_output)
         page.start.clicked.connect(self._start_convert)
         page.stop.clicked.connect(self._stop_convert)
@@ -1470,6 +1471,17 @@ class MainWindow(QMainWindow):
         if chosen:
             self._open_path(Path(chosen))
 
+    def pick_disc(self) -> None:
+        if self._converting:
+            return
+        if not video.is_available():
+            self._download_video_support(then=self.pick_disc)
+            return
+        dialog = DiscDialog(self)
+        dialog.setStyleSheet(style_for(self.settings.theme))
+        if dialog.exec() and dialog.copied is not None:
+            self._open_path(dialog.copied)
+
     def _open_path(self, path: Path) -> None:
         if self._converting:
             return
@@ -1577,6 +1589,7 @@ class MainWindow(QMainWindow):
             start, limit = in_frame, max(1, out_frame - in_frame + 1)
         page.start.setEnabled(False)
         page.pick_video.setEnabled(False)
+        page.pick_disc.setEnabled(False)
         page.play_button.setEnabled(False)
         page.stop.setVisible(True)
         page.bar.setVisible(True)
@@ -1627,6 +1640,7 @@ class MainWindow(QMainWindow):
         page = self.video_page
         page.start.setEnabled(page.source is not None)
         page.pick_video.setEnabled(True)
+        page.pick_disc.setEnabled(True)
         page.play_button.setEnabled(page.source is not None)
         page.stop.setVisible(False)
         page.bar.setVisible(False)

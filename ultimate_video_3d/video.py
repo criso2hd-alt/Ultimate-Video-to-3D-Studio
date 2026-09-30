@@ -93,6 +93,21 @@ def _bit_depth(pix_fmt: str) -> int:
     return 8
 
 
+def _pixel_aspect(sar) -> float:
+    """Width of a pixel relative to its height; 1.0 for square pixels or when the file does not say."""
+    try:
+        value = float(sar) if sar else 1.0
+    except (TypeError, ValueError, ZeroDivisionError):
+        return 1.0
+    return value if 0.2 < value < 5.0 and abs(value - 1.0) > 0.01 else 1.0
+
+
+def display_width(width: int, sar) -> int:
+    """The picture's true width. A DVD stores 720 x 480 pixels that are wider than tall (32:27 for 16:9); shown as
+    stored the whole film looks squeezed, so every stage works at the display width instead."""
+    return max(2, round(width * _pixel_aspect(sar) / 2) * 2) if _pixel_aspect(sar) != 1.0 else width
+
+
 def probe(path: str | Path) -> VideoInfo:
     """Read a video's shape without decoding it."""
     import av
@@ -116,8 +131,9 @@ def probe(path: str | Path) -> VideoInfo:
             rotation = 0
         pix_fmt = ctx.pix_fmt or ""
         audio = container.streams.audio[0].codec_context.name if container.streams.audio else ""
+        sar = stream.sample_aspect_ratio or ctx.sample_aspect_ratio
         return VideoInfo(
-            width=ctx.width, height=ctx.height, fps=float(rate),
+            width=display_width(ctx.width, sar), height=ctx.height, fps=float(rate),
             frames=stream.frames or (round(duration * float(rate)) if duration else 0),
             has_audio=bool(container.streams.audio), duration=duration,
             codec=ctx.name, pix_fmt=pix_fmt, bit_depth=_bit_depth(pix_fmt),
@@ -140,7 +156,7 @@ def _src_matrix(frame) -> str:
     return "ITU709" if frame.height >= 720 else "ITU601"
 
 
-def frame_to_rgb(frame, high_bit_depth: bool, size: tuple[int, int] | None = None) -> np.ndarray:
+def frame_to_rgb(frame, high_bit_depth: bool, size: tuple[int, int] | None = None, sar=None) -> np.ndarray:
     """One decoded frame as float32 RGB in [0, 1], still in its transfer curve.
 
     The values are *encoded* (gamma / PQ / HLG), not linear: warping and
@@ -150,6 +166,9 @@ def frame_to_rgb(frame, high_bit_depth: bool, size: tuple[int, int] | None = Non
     ``size`` (width, height) scales inside FFmpeg while converting - far cheaper
     than converting a 4K frame and shrinking it afterwards, which is how the live
     preview gets a 720p proxy from a 4K source in a few milliseconds.
+
+    ``sar`` is the stream's pixel aspect ratio (a decoded frame does not carry it): when it is not square and
+    no ``size`` is given, the frame is scaled to its true width.
     """
     full = int(frame.color_range or 0) == _RANGE_FULL
     kwargs = {
@@ -158,6 +177,10 @@ def frame_to_rgb(frame, high_bit_depth: bool, size: tuple[int, int] | None = Non
         "dst_color_range": "JPEG",
     }
     rotation = int(getattr(frame, "rotation", 0) or 0) % 360
+    if size is None:
+        shown = display_width(frame.width, sar)
+        if shown != frame.width:
+            size = (shown, frame.height)         # non-square pixels (DVD): scale to the real shape here
     if size is not None:
         width, height = size
         if rotation in (90, 270):
@@ -189,6 +212,7 @@ def frames(
         stream = container.streams.video[0]
         stream.thread_type = "AUTO"
         high = _bit_depth(stream.codec_context.pix_fmt or "") > 8
+        sar = stream.sample_aspect_ratio or stream.codec_context.sample_aspect_ratio
         fps = float(stream.average_rate or stream.base_rate or 24)
         offset = 0
         if start > 0 and stream.time_base:
@@ -212,7 +236,7 @@ def frames(
                 continue
             if limit is not None and emitted >= limit:
                 return
-            yield index, frame_to_rgb(frame, high)
+            yield index, frame_to_rgb(frame, high, sar=sar)
             index += 1
             emitted += 1
 

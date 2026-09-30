@@ -157,11 +157,11 @@ def test_the_tour_is_offered_once_on_a_fresh_install_only(win, qapp, monkeypatch
     assert shown == []                                                      # (tests and harnesses opt out)
 
 
-def test_source_card_has_the_file_button_and_a_disabled_disc_placeholder(win):
+def test_source_card_has_the_file_button_and_the_disc_button(win):
     page = win.video_page
     assert page.pick_video.isEnabled() and "video file" in page.pick_video.text()
-    assert not page.pick_disc.isEnabled() and "coming soon" in page.pick_disc.text()
-    assert "0.2" in page.pick_disc.toolTip()
+    assert page.pick_disc.isEnabled() and "disc" in page.pick_disc.text()
+    assert "coming soon" not in page.pick_disc.text()
 
 
 def test_timeline_is_drawn_empty_before_any_video_is_open(win, qapp):
