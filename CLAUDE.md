@@ -225,6 +225,20 @@ from this same list.
 - Still to do: deinterlace and 3:2 pulldown for DVD (needs a real DVD to check), audio-track / subtitle choice,
   pause and resume for movie-length copies and conversions, Blu-ray playlists that repeat one clip (decoys).
 
+## Depth zones (0.2): showing where things will sit relative to the screen
+
+`zones.py` turns `stereo.disparity_map` (signed pixels, positive = in front of the screen) into percent of the
+picture width, and is used three ways so the picture and the controls always agree: the **Zones** view on the mode bar
+(`zone_image`: warm = out of the screen, cool = behind it, a white line where the disparity crosses zero = on the
+screen, plus a legend bottom right); the **gauge** at the top of the 3D panel (`controls.DepthGauge`: histogram of the
+picture's depth for the *current* settings, comfort bands at `COMFORT`=1% and `STRONG`=2% of the width, and the
+extremes); and **coloured strips under two sliders** (`controls.MarkedSlider`): *3D strength* green/amber/red
+(`strength_marks`, exact because disparity is linear in strength) and *Depth position* warm/light/cool with a tick at
+the median (`convergence_marks`, from the 10th/90th depth percentiles - not the 2nd/98th, because the depth model
+rescales every scene to span 0..1, which would always read full range). Stats ride on `PreviewResult.stats["zones"]`
+and reach `ThreeDPanel.set_depth_stats` from the live path only (buffered playback does not carry them). The percent
+thresholds are rules of thumb for comfort, not a standard: tune them if testers disagree.
+
 ## VR (planned for 0.2, Windows first)
 
 Native OpenXR player, integrated (not a file you open elsewhere): *Preview in VR* renders a ~5 s clip at export

@@ -34,6 +34,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from . import zones as zonesmod
 from .widgets import (
     FONT_DISPLAY,
     FONT_MONO,
@@ -46,6 +47,67 @@ from .widgets import (
     apply_font,
     to_qimage_u8,
 )
+
+
+class MarkedSlider(QSlider):
+    """A slider with a thin coloured strip under its track saying what each part of the range does.
+
+    Used on *Depth position*: left of the first mark the whole picture comes out of the screen (warm), between the
+    marks it is split across the screen (light), right of the second everything sinks behind it (cool). The marks are
+    fractions of the slider's range (0..1). Nothing is drawn until :meth:`set_zones` gives it some.
+    """
+
+    WARM, SPLIT, COOL = QColor(255, 107, 26), QColor(210, 218, 228), QColor(26, 140, 255)
+    GOOD, STRONG, TOO_MUCH = QColor(80, 200, 120), QColor(240, 180, 60), QColor(240, 90, 80)
+
+    def __init__(self, orientation, parent: QWidget | None = None) -> None:
+        super().__init__(orientation, parent)
+        self._zones: tuple[float, float] | None = None
+        self._mid: float | None = None
+        self._strip: list[tuple[float, float, QColor]] = []
+
+    def set_strip(self, segments: list[tuple[float, float, QColor]] | None, tick: float | None = None) -> None:
+        """Colour the strip: (from, to, colour) segments as fractions (0..1) of the range, and an optional tick."""
+        clip = lambda v: min(max(v, 0.0), 1.0)  # noqa: E731
+        strip = [(clip(a), clip(b), c) for a, b, c in (segments or [])]
+        tick = None if tick is None else clip(tick)
+        if strip != self._strip or tick != self._mid:
+            self._strip, self._mid = strip, tick
+            self.update()
+
+    def set_zones(self, lo: float | None, hi: float | None, mid: float | None = None) -> None:
+        """Depth position's strip: warm up to ``lo``, light up to ``hi``, cool beyond; a tick at ``mid``."""
+        zones = None if lo is None or hi is None else (min(max(lo, 0.0), 1.0), min(max(hi, 0.0), 1.0))
+        self._zones = zones
+        if zones is None:
+            self.set_strip(None)
+        else:
+            self.set_strip([(0.0, zones[0], self.WARM), (zones[0], zones[1], self.SPLIT), (zones[1], 1.0, self.COOL)], mid)
+
+    def paintEvent(self, event) -> None:  # noqa: N802 - Qt name
+        super().paintEvent(event)
+        if not self._strip:
+            return
+        from PySide6.QtWidgets import QStyle, QStyleOptionSlider
+
+        option = QStyleOptionSlider()
+        self.initStyleOption(option)
+        groove = self.style().subControlRect(QStyle.ComplexControl.CC_Slider, option,
+                                             QStyle.SubControl.SC_SliderGroove, self)
+        left, right = groove.left() + 4, groove.right() - 4                # keep clear of the handle's travel ends
+        span = max(1, right - left)
+        top = min(self.height() - 4, groove.bottom() + 5)
+        painter = QPainter(self)
+        painter.setPen(Qt.PenStyle.NoPen)
+        for a, b, colour in self._strip:
+            x0, x1 = left + round(a * span), left + round(b * span)
+            if x1 > x0:
+                painter.setBrush(colour)
+                painter.drawRoundedRect(x0, top, x1 - x0, 4, 2, 2)
+        if self._mid is not None:                                          # half the picture is in front at this setting
+            painter.setBrush(QColor(255, 255, 255))
+            painter.drawRect(left + round(self._mid * span) - 1, top - 2, 2, 8)
+        painter.end()
 
 
 class ParamSlider(QWidget):
@@ -77,7 +139,7 @@ class ParamSlider(QWidget):
         header.addStretch(1)
         header.addWidget(self._value)
         layout.addLayout(header)
-        self._slider = QSlider(Qt.Orientation.Horizontal)
+        self._slider = MarkedSlider(Qt.Orientation.Horizontal)
         self._slider.setRange(int(round(minimum * self._scale)), int(round(maximum * self._scale)))
         self._slider.setValue(int(round(value * self._scale)))
         self._slider.valueChanged.connect(self._moved)
@@ -90,6 +152,25 @@ class ParamSlider(QWidget):
 
     def value(self) -> float:
         return self._slider.value() / self._scale
+
+    def set_strip(self, segments: list[tuple[float, float, str]] | None) -> None:
+        """Colour the strip under the track from segments of this slider's own scale: (from, to, "good"|"strong"|"too")."""
+        if not segments:
+            self._slider.set_strip(None)
+            return
+        span = (self._slider.maximum() - self._slider.minimum()) / self._scale
+        base = self._slider.minimum() / self._scale
+        colours = {"good": MarkedSlider.GOOD, "strong": MarkedSlider.STRONG, "too": MarkedSlider.TOO_MUCH}
+        self._slider.set_strip([((a - base) / span, (b - base) / span, colours[kind]) for a, b, kind in segments])
+
+    def set_zones(self, lo: float | None, hi: float | None, mid: float | None = None) -> None:
+        """Mark the strip under the track: ``lo``, ``hi`` (and a tick at ``mid``) are values on this slider's scale."""
+        span = (self._slider.maximum() - self._slider.minimum()) / self._scale
+        if lo is None or hi is None or span <= 0:
+            self._slider.set_zones(None, None)
+            return
+        base = self._slider.minimum() / self._scale
+        self._slider.set_zones((lo - base) / span, (hi - base) / span, None if mid is None else (mid - base) / span)
 
     def _update_text(self) -> None:
         v = self.value()
@@ -773,3 +854,95 @@ def _scope_image(frame: np.ndarray, mode: int, w: int, h: int) -> np.ndarray:
         yy, xx = np.ogrid[:h, :w]
         out[np.abs(np.hypot(xx - cx, yy - cy) - size / 2) < 0.8] = (45, 60, 90)
     return np.clip(out, 0, 255).astype(np.uint8)
+
+
+class DepthGauge(QWidget):
+    """Where the picture will sit relative to the screen, drawn as a small histogram.
+
+    Left is *in front of the screen* (warm), the middle line is the screen, right is *behind* it (cool). The bars
+    show how much of the picture is at each distance for the current settings, so moving a slider visibly slides and
+    stretches them. Faint bands behind them mark comfortable, strong and too-strong separation (as a percentage of
+    the picture's width), and two numbers give the extremes.
+    """
+
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self._stats = zonesmod.DepthStats()
+        self.setMinimumHeight(86)
+        self.setToolTip("Where things will sit. Left = comes out of the screen, middle = on the screen, "
+                        "right = behind it. The faint bands show comfortable, strong and too-strong separation.")
+
+    def set_stats(self, stats: zonesmod.DepthStats) -> None:
+        self._stats = stats
+        self.update()
+
+    def sizeHint(self) -> QSize:  # noqa: N802 - Qt name
+        return QSize(260, 92)
+
+    def paintEvent(self, event) -> None:  # noqa: N802 - Qt name
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        w, h = self.width(), self.height()
+        panel = QRectF(0.5, 0.5, w - 1, h - 1)
+        painter.setPen(QPen(QColor(255, 255, 255, 26), 1))
+        painter.setBrush(QColor(0, 0, 0, 70))
+        painter.drawRoundedRect(panel, 8, 8)
+        stats = self._stats
+        small = QFont(self.font())
+        small.setPixelSize(10)
+        painter.setFont(small)
+        top, bottom = 22.0, h - 22.0
+        left, right = 10.0, w - 10.0
+        span = right - left
+
+        def x_of(percent: float) -> float:
+            """Position for a disparity in percent (positive = in front = left of centre)."""
+            return left + (0.5 - percent / (2 * zonesmod.SCALE)) * span
+
+        # comfort bands, faint: green within COMFORT of the screen, amber to STRONG, red beyond
+        for lo, hi, colour in ((-zonesmod.COMFORT, zonesmod.COMFORT, QColor(80, 200, 120, 34)),
+                               (zonesmod.COMFORT, zonesmod.STRONG, QColor(240, 180, 60, 34)),
+                               (-zonesmod.STRONG, -zonesmod.COMFORT, QColor(240, 180, 60, 34)),
+                               (zonesmod.STRONG, zonesmod.SCALE, QColor(240, 90, 80, 38)),
+                               (-zonesmod.SCALE, -zonesmod.STRONG, QColor(240, 90, 80, 38))):
+            a, b = sorted((x_of(lo), x_of(hi)))
+            painter.fillRect(QRectF(a, top, b - a, bottom - top), colour)
+        # the bars: the histogram runs from -SCALE (behind) to +SCALE (in front), so it is flipped to put "in front" left
+        if stats.valid:
+            bins = len(stats.hist)
+            step = span / bins
+            for i, value in enumerate(stats.hist[::-1]):
+                if value <= 0.01:
+                    continue
+                percent = zonesmod.SCALE - (i + 0.5) * (2 * zonesmod.SCALE / bins)
+                warm = percent > 0
+                colour = QColor(255, 120, 40) if warm else QColor(40, 150, 255)
+                if abs(percent) < 0.06:
+                    colour = QColor(235, 238, 245)
+                bar = max(2.0, float(value) * (bottom - top - 2))
+                painter.fillRect(QRectF(left + i * step + 0.5, bottom - bar, max(1.0, step - 1.0), bar), colour)
+        # the screen
+        painter.setPen(QPen(QColor(255, 255, 255, 200), 1))
+        painter.drawLine(QPointF(x_of(0.0), top - 3), QPointF(x_of(0.0), bottom + 3))
+        painter.setPen(QColor(200, 208, 220))
+        painter.drawText(QRectF(left, bottom + 4, span, 14), Qt.AlignmentFlag.AlignHCenter, "SCREEN")
+        painter.drawText(QRectF(left, bottom + 4, 80, 14), Qt.AlignmentFlag.AlignLeft, "IN FRONT")
+        painter.drawText(QRectF(right - 80, bottom + 4, 80, 14), Qt.AlignmentFlag.AlignRight, "BEHIND")
+        # the numbers
+        if not stats.valid:
+            painter.drawText(QRectF(left, 4, span, bottom - 4), Qt.AlignmentFlag.AlignCenter,
+                             "Pick a 3D view under the picture\nto see where things will sit")
+            painter.end()
+            return
+        painter.setPen(QColor(255, 150, 90))
+        painter.drawText(QRectF(left, 4, span / 2 - 4, 16), Qt.AlignmentFlag.AlignLeft,
+                         f"out {stats.out_pct:.1f}%" if stats.out_pct > 0.05 else "nothing out")
+        painter.setPen(QColor(110, 180, 255))
+        painter.drawText(QRectF(left + span / 2 + 4, 4, span / 2 - 4, 16), Qt.AlignmentFlag.AlignRight,
+                         f"behind {stats.back_pct:.1f}%" if stats.back_pct > 0.05 else "nothing behind")
+        verdict = stats.verdict
+        shade = {"comfortable": QColor(120, 210, 140), "strong": QColor(240, 190, 80),
+                 "too strong": QColor(245, 100, 90)}.get(verdict, QColor(200, 208, 220))
+        painter.setPen(shade)
+        painter.drawText(QRectF(left, 4, span, 16), Qt.AlignmentFlag.AlignHCenter, verdict)
+        painter.end()

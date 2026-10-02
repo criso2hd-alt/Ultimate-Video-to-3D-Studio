@@ -32,6 +32,7 @@ import numpy as np
 from PySide6.QtCore import QObject, Signal
 
 from . import depth as depthmod
+from . import zones
 from . import grade, stereo
 
 #: Default proxy height. A 720p frame is a ninth the pixels of 4K, which is what
@@ -48,6 +49,7 @@ PREVIEW_MODES = (
     ("sbs", "Side by side"),
     ("wiggle", "Wiggle"),
     ("depth", "Depth"),
+    ("zones", "Zones"),
     ("parallax", "Parallax"),
     ("holes", "Holes"),
     ("orbit", "3D orbit"),
@@ -61,6 +63,7 @@ PREVIEW_MODE_TIPS = {
     "sbs": "Left and right eye next to each other, full size.",
     "wiggle": "The two eyes alternate: depth you can judge without any glasses.",
     "depth": "The depth map. Warm = near, cool = far.",
+    "zones": "Where each part of the picture sits: warm = out of the screen, cool = behind it, a white line = on it.",
     "parallax": "How far each pixel moves between the eyes. Brighter = more.",
     "holes": "Where the renderer had to invent picture behind an edge (pink).",
     "orbit": "The depth as geometry, slowly orbiting.",
@@ -275,7 +278,8 @@ def render_frame(p: PreviewParams, frame: np.ndarray, steady: np.ndarray | None,
     return PreviewResult(
         images, badge, wiggle, scope,
         depth=d if orbit else None, colour=_u8(graded) if orbit else None,
-        stats={"hole_pct": float(pair.hole_left[::3, ::3].mean() * 100.0)},
+        stats={"hole_pct": float(pair.hole_left[::3, ::3].mean() * 100.0),
+               "zones": zones.measure(pair.disparity, d).to_dict()},
     )
 
 
@@ -292,6 +296,8 @@ def build_views(p: PreviewParams, pair: stereo.Pair, d: np.ndarray, graded: np.n
         return [eye(pair.left), eye(pair.right)], "Wiggle · no glasses needed", True
     if mode == "depth":
         return [_heat(d)], "Depth · warm = near", False
+    if mode == "zones":
+        return [zones.zone_image(graded, pair.disparity)], "Zones · warm = out of the screen, cool = behind", False
     if mode == "parallax":
         diff = np.abs(pair.left - pair.right).mean(axis=-1)
         scale = max(float(np.percentile(diff, 99.5)), 1e-3)

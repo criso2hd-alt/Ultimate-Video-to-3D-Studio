@@ -287,7 +287,7 @@ def test_view_bar_is_permanent_with_2d_first_and_sits_above_the_timeline(qapp):
         qapp.processEvents()
         page = win.video_page
         assert [b.text() for b in page.mode_buttons.values()] == [
-            "2D", "Output", "Anaglyph", "Side by side", "Wiggle", "Depth", "Parallax", "Holes", "3D orbit"]
+            "2D", "Output", "Anaglyph", "Side by side", "Wiggle", "Depth", "Zones", "Parallax", "Holes", "3D orbit"]
         assert list(page.mode_buttons)[0] == "original"
         assert page.mode_bar.isVisible()
         assert page.mode_bar.mapToGlobal(QPoint(0, 0)).y() < page.timeline.mapToGlobal(QPoint(0, 0)).y()

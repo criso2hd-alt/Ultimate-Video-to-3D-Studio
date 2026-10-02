@@ -26,10 +26,12 @@ from PySide6.QtWidgets import (
 )
 
 from . import encoders, lut, paths, stereo
+from . import zones as zonesmod
 from .controls import (
     CollapsibleCard,
     ColourWheel,
     CurveEditor,
+    DepthGauge,
     ParamSlider,
     ScopeView,
     SectionTabs,
@@ -337,15 +339,20 @@ class ThreeDPanel(ModuleCard):
         self.add(self.layout_note)
         self._layout()
 
+        self.gauge = DepthGauge()
+        self.add(self.gauge)
         self.strength = ParamSlider("3D strength", 0, 100, s.strength, 50, 0,
                                     tooltip="How far the two eyes are pushed apart. Cinema is around 30-50; "
                                             "VR headsets tolerate more. Too much is uncomfortable.")
         self.strength.changed.connect(lambda v: self._set("strength", v))
+        self.strength.setToolTip(self.strength.toolTip() + "\n\nThe coloured strip under the slider shows how strong the "
+                                 "effect is for this picture: green = comfortable, amber = strong, red = too strong.")
         self.add(self.strength)
         self.convergence = ParamSlider("Depth position", 0, 100, s.convergence, 55, 0,
                                        tooltip="Where the screen sits inside the scene. Low pulls everything "
                                                "out of the screen; high pushes it behind, like a window.")
         self.convergence.changed.connect(lambda v: self._set("convergence", v))
+        self.convergence.setToolTip(self.convergence.toolTip() + "\n\nThe coloured strip under the slider shows what this picture does at each setting: warm = nearly all of it comes out of the screen, light = split across the screen (the white tick is where half of it is in front), cool = nearly all of it is behind the screen.")
         self.add(self.convergence)
 
         self.near = ParamSlider("Foreground depth", 0, 200, s.near_scale, 100, 0, "%",
@@ -392,6 +399,18 @@ class ThreeDPanel(ModuleCard):
         for widget in self._adv_widgets:
             self.add(widget)
             widget.setVisible(False)
+
+    def set_depth_stats(self, stats: zonesmod.DepthStats) -> None:
+        """Show where the current picture sits, on the gauge and as the marks under Depth position."""
+        self.gauge.set_stats(stats)
+        marks = zonesmod.convergence_marks(stats)
+        self.convergence.set_zones(*(marks if marks else (None, None, None)))
+        limits = zonesmod.strength_marks(stats, self.strength.value())
+        if limits is None:
+            self.strength.set_strip(None)
+        else:
+            comfort, strong = limits
+            self.strength.set_strip([(0.0, comfort, "good"), (comfort, strong, "strong"), (strong, 100.0, "too")])
 
     def _advanced(self, on: bool) -> None:
         self.advanced.setText("Advanced ▾" if on else "Advanced ▸")

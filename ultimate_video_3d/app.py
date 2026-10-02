@@ -39,6 +39,7 @@ from PySide6.QtWidgets import (
 
 from .discdialog import DiscDialog
 from . import library as librarymod
+from . import zones as zonesmod
 from . import resume as resumemod
 from .librarypage import LibraryPage
 from . import APP_TITLE, __version__, bootstrap, cloud, models, onboarding, support, updates, depth as depthmod, encoders, paths, pipeline, stereo, sysinfo, video, warmup
@@ -996,6 +997,8 @@ class MainWindow(QMainWindow):
         self._orbit_timer.stop()
         page.preview.set_images(result.images, result.badge, result.wiggle)
         stats = result.stats
+        if stats.get("zones"):
+            page.threed.set_depth_stats(zonesmod.DepthStats.from_dict(stats["zones"]))
         if stats:
             speed = f"{stats.get('fps', 0):.0f} fps · " if self.player.playing else ""
             self._live_note = (f"{result.device} · {result.images[0].shape[0]}p preview · {speed}"
