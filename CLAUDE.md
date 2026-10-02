@@ -255,6 +255,10 @@ Stereo confirmed in the headset (2026-10-02): the test card's OUT squares come t
 away, 72 fps steady for a minute. The owner is modelling a custom baked room in Blender: its file contract is in
 `docs/vr-room-spec.md` (GLB + lit / dim / screen-only bakes, `Screen`, `Seat_*`, `BiasGlow`, `FloorMirror`); the
 procedural room in `vr/renderer.py` is the stand-in until it arrives.
+TODO (VR): make the player screen-size aware. The owner's room has a ~5.19 m wide screen (235 in), so 1% of the picture
+width is 5.2 cm of eye separation and 'behind' disparity must stay under ~1.2% of the width (IPD 6.3 cm) or the eyes
+diverge; a depth-limit/convergence shift keyed on the `Screen` mesh width, with a visible note when it acts. The
+comfort bands in `zones.py` assume a smaller screen.
 Not yet checked: SteamVR and Virtual Desktop runtimes (`XR_RUNTIME_JSON=<json>` selects one for a single process
 without touching the system setting).
 The runtime prints a lot of its own log to stdout: never parse stdout for results.

@@ -33,6 +33,26 @@ Textures: PNG or JPEG, sRGB (colour), not linear.
 The app mixes: `result = mix(dim, lit, light_level) + screen_bake * picture_colour * strength`. So "lights up when the film
 pauses" is just `light_level` fading from 0 to 1.
 
+## The glow without a mirror (carpet, matte rooms)
+The **screen-only bake is the global illumination**: Cycles bounces the screen's light off the carpet, walls, ceiling and
+furniture, so the room is lit *by the film* with real bounce, not a flat tint. Bake it in Cycles (not EEVEE), Combined,
+Diffuse bounces 4 or more, denoise on, into the same atlas. The app multiplies it by the picture's live colour.
+`BiasGlow` is the separate LED halo behind the screen, tinted from the picture's four edges by the same colour feed.
+**Optional zoned bakes** (better): bake the screen's left half and right half separately (or four quadrants) as grayscale
+irradiance and pack them into the channels of one RGBA image (`room_screen_zones.png`, R=left G=right, or R=TL G=TR B=BL
+A=BR). Then each side of the room takes the colour of the matching side of the picture. The app accepts either.
+
+## Screen size and depth (read this if the screen is bigger than ~120 in)
+Picture depth is a percentage of the screen's width, so a bigger virtual screen means more real separation between the
+eyes. Behind-the-screen separation must stay under the eye distance (about 6.3 cm) or the eyes diverge. On a screen
+W metres wide that is about `0.063 / W * 100` percent: 2.3% at 120 in (2.66 m), but only about 1.2% at 235 in (5.19 m).
+The VR player will limit this automatically for the room's `Screen` size.
+
+## Seats: eye positions
+Eyes are about 0.7 m above the seat cushion: seated on the floor about 1.15 m, on a 0.43 m riser about 1.58 m, on a 0.86 m
+riser about 2.0 m. Comfortable picture width is 35-45 degrees: distance = screen width / (2 * tan(half the angle)).
+Keep the top of the picture under about 25 degrees above the eye line for the main seats.
+
 ## Named objects (the names matter; the app finds them by name)
 - **`Screen`**: a single quad, 16:9, **100 in = 2.214 x 1.245 m** or **120 in = 2.657 x 1.494 m**, facing the seats,
   normal pointing into the room. UV: map the whole quad 0..1 (the picture fills it; a wider film gets black bars).
@@ -42,8 +62,9 @@ pauses" is just `light_level` fading from 0 to 1.
   you so your head is at that empty and you look where it looks. Optional custom property `label` for the menu name.
 - **`BiasGlow`**: a flat quad on the wall **behind the screen**, a bit larger than it (the soft halo area of a TV
   backlight). The app tints it from the picture's four edges (top, bottom, left, right) like an Ambilight strip.
-- **`FloorMirror`** (optional): a flat quad exactly on the floor area that should reflect the screen. The app draws the
-  fading reflection on it. Omit it for a matte floor.
+- **`FloorMirror`** (optional, **polished floors only**): a flat quad exactly on the floor area that should reflect the
+  screen. The app draws the fading reflection on it. **Omit it for carpet or any matte floor**: the screen-only bake below
+  already puts the screen's light on the floor, which is what makes carpet look lit by the film.
 - **`Spawn`** (optional): an Empty used if there are no seats. 
 
 Everything else (walls, seats, furniture, props, logos) is just baked geometry in the one atlas; the logos on the side
