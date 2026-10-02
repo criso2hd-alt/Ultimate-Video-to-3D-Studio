@@ -5,9 +5,12 @@ is baked, so the headset runs it easily; the app adds the live parts (the video,
 reflection, the LED glow, the light dimming).
 
 ## Units and axes
-- Metres. Floor at **y = 0**. Export glTF Binary (`.glb`) with Blender's default **+Y up** conversion.
-- The front of the room (the screen wall) is **-Z**, the viewer looks toward -Z. (Blender: face -Y when you model it;
-  the exporter converts.) If it comes out the other way I will flip it with one switch, so don't worry about it.
+Start from the template: `docs/room-template/room_template.blend` (made by `scripts/blender/make_room_template.py`).
+- Metres. Floor at **z = 0** in Blender (Z up). Export glTF Binary (`.glb`) with Blender's default **+Y up** conversion.
+- **Blender axes: the screen wall is at y = 0 and the room extends toward -Y. The viewers sit at negative y and look
+  toward +Y.** (The exporter turns Blender +Y into glTF -Z, which is the way the app looks.) x = 0 is the middle of the
+  room and +x is the viewer's right. An Empty with **zero rotation already looks at the screen**: its green Y arrow
+  is its forward. (An earlier version of this note said -Y; that was wrong.)
 
 ## Files in the folder
 | file | what |
