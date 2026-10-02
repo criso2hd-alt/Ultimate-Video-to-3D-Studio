@@ -119,6 +119,9 @@ class Screen:
     width: float = 3.2
     lift: float = 0.0
     curve: float = 0.0                       # 0 flat; > 0 bends the sides toward the viewer (radians of arc)
+    #: In a room, the gap between the floor and the picture's lower edge (metres). The screen then sits on the room,
+    #: not at the viewer's eye height, so it looks like a cinema screen whatever the person's height. None: eye height.
+    floor_clearance: float | None = None
     origin: tuple[float, float, float] = (0.0, 1.6, 0.0)       # the viewer's head when it was placed
     heading: float = 0.0                     # which way the viewer faced then (yaw)
 
@@ -131,7 +134,10 @@ class Screen:
 
     def centre(self) -> np.ndarray:
         forward = yaw_matrix(self.heading)[:3, :3] @ np.array([0.0, 0.0, -1.0])
-        return np.asarray(self.origin) + forward * self.distance + np.array([0.0, self.lift, 0.0])
+        centre = np.asarray(self.origin, np.float64) + forward * self.distance
+        centre[1] = (self.origin[1] + self.lift if self.floor_clearance is None
+                     else self.floor_clearance + self.height / 2 + self.lift)
+        return centre
 
     def model_matrix(self) -> np.ndarray:
         """Unit quad (-0.5..0.5 in x and y, facing +z) -> world: sized, turned to face the viewer, and placed."""

@@ -11,6 +11,8 @@ shader (a mirrored ray is traced to the screen) rather than by drawing the scene
 
 from __future__ import annotations
 
+import time
+
 import numpy as np
 from OpenGL import GL
 
@@ -20,6 +22,27 @@ ROOM, VOID = "room", "void"
 
 # Room size in metres, in the same world as the screen (floor at y = 0, centred on x = 0).
 ROOM_HALF_WIDTH, ROOM_FRONT, ROOM_BACK, ROOM_HEIGHT = 5.0, 3.0, 9.0, 4.2
+
+# Colour: the video is display-encoded (sRGB-ish) and is shown *untouched* on the screen. The room is lit in
+# linear light (decode, light, encode) and everything is written display-encoded into an sRGB swapchain, which the
+# headset's compositor decodes again. A plain 8-bit UNORM swapchain is read as linear by the Meta runtime, which
+# brightens everything a second time and bands the darks; hence the sRGB format chosen in session.py.
+_COMMON = """
+vec3 to_linear(vec3 c) { return pow(max(c, vec3(0.0)), vec3(2.2)); }
+vec3 to_display(vec3 c) { return pow(max(c, vec3(0.0)), vec3(1.0 / 2.2)); }
+uniform float u_time;
+float hash(vec2 p) {
+    p = fract(p * vec2(443.897, 441.423));
+    p += dot(p, p.yx + 19.19);
+    return fract((p.x + p.y) * p.x);
+}
+// +-1 level of triangular noise, so smooth gradients do not show as steps
+vec3 dither(vec3 c) {
+    vec2 f = gl_FragCoord.xy + fract(u_time) * 61.0;
+    float n = hash(f) + hash(f.yx + 7.31) - 1.0;
+    return c + vec3(n) / 255.0;
+}
+"""
 
 _SCREEN_VS = """#version 330 core
 layout(location = 0) in vec2 p;
@@ -31,7 +54,7 @@ void main() {
 }
 """
 
-_SCREEN_FS = """#version 330 core
+_SCREEN_FS = "#version 330 core\n" + _COMMON + """
 in vec2 v_uv;
 uniform sampler2D u_tex;
 uniform vec4 u_rect;                            // the part of the frame this eye sees: u0 v0 u1 v1
@@ -39,7 +62,7 @@ uniform float u_gain;
 out vec4 colour;
 void main() {
     vec2 uv = mix(u_rect.xy, u_rect.zw, v_uv);
-    colour = vec4(texture(u_tex, uv).rgb * u_gain, 1.0);
+    colour = vec4(dither(texture(u_tex, uv).rgb * u_gain), 1.0);
 }
 """
 
@@ -56,12 +79,12 @@ void main() {
 }
 """
 
-_ROOM_FS = """#version 330 core
+_ROOM_FS = "#version 330 core\n" + _COMMON + """
 in vec3 v_pos;
 in vec3 v_nrm;
 uniform sampler2D u_tex;
 uniform vec4 u_rect;
-uniform vec3 u_glow;                            // the picture's average colour, as light
+uniform vec3 u_glow;                            // the picture's average colour (display-encoded)
 uniform vec3 u_eye;
 uniform vec3 u_screen_centre;
 uniform mat4 u_screen_inv;                      // world -> the screen's unit quad
@@ -69,24 +92,28 @@ uniform float u_gain;
 uniform float u_light;                          // 0 when there is no picture yet
 out vec4 colour;
 
+// What a polished floor shows here: trace the mirrored ray back to the screen. The picture is brightest where
+// the floor meets the screen's lower edge and fades with the distance the light travelled (and blurs), the way
+// a real reflection on a glossy floor dissolves into it instead of being a flipped copy.
 vec3 reflection_of_screen(vec3 pos) {
-    // Where would a mirror at this point of the floor show the screen? Trace the mirrored ray back to it.
     vec3 v = normalize(pos - u_eye);
     vec3 r = vec3(v.x, -v.y, v.z);
     vec3 o = (u_screen_inv * vec4(pos, 1.0)).xyz;
     vec3 d = (u_screen_inv * vec4(r, 0.0)).xyz;
     if (abs(d.z) < 1e-5) return vec3(0.0);
-    float t = -o.z / d.z;
+    float t = -o.z / d.z;                       // metres travelled to the screen
     if (t <= 0.0) return vec3(0.0);
     vec2 xy = o.xy + t * d.xy;
-    // the picture, softened the farther the light travelled (a slightly glossy floor), fading out at its edges
-    vec2 e = smoothstep(vec2(0.5), vec2(0.42), abs(xy));
+    vec2 e = smoothstep(vec2(0.5), vec2(0.40), abs(xy));
     float edge = e.x * e.y;
     if (edge <= 0.0) return vec3(0.0);
-    vec2 uv = vec2(xy.x + 0.5, 0.5 - xy.y);
-    uv = mix(u_rect.xy, u_rect.zw, uv);
-    float blur = clamp(log2(1.0 + t * 1.6), 0.0, 5.0);
-    return textureLod(u_tex, uv, blur).rgb * u_gain * edge;
+    vec2 uv = mix(u_rect.xy, u_rect.zw, vec2(xy.x + 0.5, 0.5 - xy.y));
+    // How high up the screen is the point being reflected? The bottom of the picture reflects strongly, the top
+    // hardly at all: that gradient is what makes a floor reflection melt into the floor instead of being a flipped copy.
+    float hy = max(pos.y + r.y * t, 0.0);
+    float blur = clamp(log2(1.0 + t * 1.2 + hy * 2.5), 0.0, 6.0);
+    float fade = exp(-hy * 0.85) * exp(-t * 0.10);
+    return to_linear(textureLod(u_tex, uv, blur).rgb * u_gain) * edge * fade;
 }
 
 void main() {
@@ -94,16 +121,16 @@ void main() {
     vec3 to_screen = u_screen_centre - v_pos;
     float dist = length(to_screen);
     float facing = max(dot(n, to_screen / max(dist, 1e-3)), 0.0);
-    float falloff = 1.0 / (1.0 + 0.045 * dist * dist);
-    vec3 albedo = n.y > 0.5 ? vec3(0.07, 0.07, 0.09) : (n.y < -0.5 ? vec3(0.05, 0.05, 0.06) : vec3(0.16, 0.15, 0.15));
-    vec3 lit = albedo * (0.10 + u_light * 2.6 * facing * falloff * u_glow * 1.8);
+    float falloff = 1.0 / (1.0 + 0.20 * dist * dist);
+    vec3 glow = to_linear(u_glow);
+    float albedo = n.y > 0.5 ? 0.030 : (n.y < -0.5 ? 0.020 : 0.075);
+    vec3 lit = vec3(albedo) * (0.06 + u_light * 9.0 * facing * falloff * glow);
     if (n.y > 0.5) {
-        float fresnel = 0.22 + 0.5 * pow(1.0 - clamp(abs(normalize(v_pos - u_eye).y), 0.0, 1.0), 3.0);
+        float grazing = 1.0 - clamp(abs(normalize(v_pos - u_eye).y), 0.0, 1.0);
+        float fresnel = 0.28 + 0.60 * pow(grazing, 2.5);
         lit += reflection_of_screen(v_pos) * fresnel * u_light;
-        // pooled colour on the floor around and in front of the screen
-        lit += u_glow * u_light * 0.10 * falloff * 2.0;
     }
-    colour = vec4(lit, 1.0);
+    colour = vec4(dither(to_display(lit)), 1.0);
 }
 """
 
@@ -242,6 +269,7 @@ class Renderer:
         """
         if not self._ready:
             self.init_gl()
+        GL.glDisable(GL.GL_FRAMEBUFFER_SRGB)               # the shaders write display-encoded values themselves
         GL.glEnable(GL.GL_DEPTH_TEST)
         GL.glDepthFunc(GL.GL_LESS)
         GL.glDisable(GL.GL_CULL_FACE)
@@ -249,6 +277,7 @@ class Renderer:
         GL.glClear(GL.GL_COLOR_BUFFER_BIT | GL.GL_DEPTH_BUFFER_BIT)
         vp = projection @ view
         rect = geo.eye_uv_rect(layout, eye)
+        now = float(time.monotonic() % 1000.0)
         model = screen.model_matrix()
 
         GL.glActiveTexture(GL.GL_TEXTURE0)
@@ -265,6 +294,7 @@ class Renderer:
             GL.glUniform3f(GL.glGetUniformLocation(program, "u_screen_centre"), *map(float, screen.centre()))
             GL.glUniform1f(GL.glGetUniformLocation(program, "u_gain"), self.gain)
             GL.glUniform1f(GL.glGetUniformLocation(program, "u_light"), 1.0 if self.has_picture else 0.0)
+            GL.glUniform1f(GL.glGetUniformLocation(program, "u_time"), now)
             GL.glBindVertexArray(self._vao_room)
             GL.glDrawArrays(GL.GL_TRIANGLES, 0, self._room_count)
 
@@ -275,6 +305,7 @@ class Renderer:
             GL.glUniform1i(GL.glGetUniformLocation(program, "u_tex"), 0)
             GL.glUniform4f(GL.glGetUniformLocation(program, "u_rect"), *rect)
             GL.glUniform1f(GL.glGetUniformLocation(program, "u_gain"), self.gain)
+            GL.glUniform1f(GL.glGetUniformLocation(program, "u_time"), now)
             GL.glBindVertexArray(self._vao_quad)
             GL.glDrawArrays(GL.GL_TRIANGLES, 0, 6)
 

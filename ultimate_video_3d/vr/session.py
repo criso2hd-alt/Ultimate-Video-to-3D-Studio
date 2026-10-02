@@ -165,6 +165,26 @@ class _Inputs:
         return hands
 
 
+def _prefer_srgb_swapchain() -> None:
+    """Make pyopenxr pick an sRGB swapchain format when the runtime offers one.
+
+    By default it prefers plain 8-bit UNORM, which the Meta runtime treats as linear light: display-encoded colours
+    come out brightened and banded. An sRGB format is decoded by the compositor, so what we write is what is seen.
+    """
+    from OpenGL import GL
+    from xr.utils.gl import OpenGLGraphics
+
+    original = OpenGLGraphics.select_color_swapchain_format
+
+    def select(runtime_formats):
+        for wanted in (GL.GL_SRGB8_ALPHA8, GL.GL_SRGB8):
+            if wanted in runtime_formats:
+                return wanted
+        return original(runtime_formats)
+
+    OpenGLGraphics.select_color_swapchain_format = staticmethod(select)
+
+
 class VRSession(QObject):
     """Owns the headset thread. Create it, call :meth:`start`, and watch the signals."""
 
@@ -236,6 +256,7 @@ class VRSession(QObject):
                                                 engine_version=0, api_version=xr.XR_CURRENT_API_VERSION),
             enabled_extension_names=[xr.KHR_OPENGL_ENABLE_EXTENSION_NAME])
         space = xr.ReferenceSpaceCreateInfo(reference_space_type=xr.ReferenceSpaceType.STAGE)
+        _prefer_srgb_swapchain()
         with ContextObject(context_provider=GLFWOffscreenContextProvider(), instance_create_info=info,
                            reference_space_create_info=space) as ctx:
             inputs = _Inputs(ctx)
@@ -292,13 +313,21 @@ class VRSession(QObject):
     def _frame(self, ctx, inputs: _Inputs, renderer: Renderer, frame_state, dt: float) -> None:
         media, screen = self.media, self.screen
         screen.aspect = media.aspect
+        screen.floor_clearance = 0.12 if self.scene == ROOM else None      # on the room's floor, or at eye height
         picture = media.take_frame()
         if picture is not None:
             renderer.upload(picture)
         elif not media.is_open and renderer.has_picture:
             renderer.clear_picture()
 
-        hands = inputs.read(frame_state.predicted_display_time) if frame_state.should_render else {}
+        hands = {}
+        if frame_state.should_render and ctx.session_state.name == "FOCUSED":
+            # Controllers only report while this app has focus; a system overlay or the headset's own menu takes
+            # it away, and asking then is an error (SessionNotFocused). Not having input for a while is fine.
+            try:
+                hands = inputs.read(frame_state.predicted_display_time)
+            except Exception:  # noqa: BLE001 - focus was lost between the state check and the call
+                hands = {}
         beams = self._controls(hands, dt)
 
         eye = 0

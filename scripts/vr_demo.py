@@ -36,7 +36,7 @@ def main() -> int:
     media = VRMedia()
     session = VRSession(media)
     print(f"{path.name}: {info.width}x{info.height}, layout {layout or 'flat'}")
-    if not media.open(path, layout, loop=False, muted=False):
+    if not media.open(path, layout, loop=info.duration < 30, muted=False):         # a short clip (a test card) repeats
         return 1
     session.state_changed.connect(lambda s: print("session:", s, flush=True))
     session.worn_changed.connect(lambda worn: (print("headset worn" if worn else "headset removed", flush=True),
