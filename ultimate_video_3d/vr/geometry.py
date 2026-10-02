@@ -1,0 +1,183 @@
+"""The maths of the VR player, with no OpenGL and no OpenXR so it can be tested anywhere.
+
+Conventions (the same as OpenXR's): metres; x right, y up, -z forward (into the scene). A *pose* is a position
+plus a unit quaternion (x, y, z, w). Matrices are 4x4 NumPy arrays written the usual (row-major) way, and are
+transposed when handed to OpenGL, which wants them column-major.
+"""
+
+from __future__ import annotations
+
+import math
+from dataclasses import dataclass
+
+import numpy as np
+
+from .. import library as lib
+
+# --- how a video's frame maps to the two eyes -----------------------------------------------------
+
+
+def eye_aspect(layout: str, width: int, height: int) -> float:
+    """Width / height of *one eye's* picture, the shape the virtual screen must have.
+
+    A half layout squeezes each eye to half the frame, so it is stretched back; a full layout (and a flat video)
+    already holds each eye at its true shape.
+    """
+    if height <= 0 or width <= 0:
+        return 16 / 9
+    if layout == "sbs_full":
+        return (width / 2) / height
+    if layout == "tb_full":
+        return width / (height / 2)
+    return width / height                    # sbs_half, tb_half and flat: the frame's own shape
+
+
+def eye_uv_rect(layout: str, eye: int) -> tuple[float, float, float, float]:
+    """The part of the frame one eye sees, as (u0, v0, u1, v1) with the origin at the frame's top-left.
+
+    ``eye`` is 0 for the left eye and 1 for the right. A flat (2D) or anaglyph video shows the whole frame to both.
+    """
+    if layout in lib.SIDE_BY_SIDE:
+        return (0.5 * eye, 0.0, 0.5 * eye + 0.5, 1.0)
+    if layout in lib.TOP_BOTTOM:
+        return (0.0, 0.5 * eye, 1.0, 0.5 * eye + 0.5)
+    return (0.0, 0.0, 1.0, 1.0)
+
+
+# --- poses and matrices ---------------------------------------------------------------------------
+
+
+def quat_to_matrix(q: tuple[float, float, float, float]) -> np.ndarray:
+    x, y, z, w = q
+    n = math.sqrt(x * x + y * y + z * z + w * w) or 1.0
+    x, y, z, w = x / n, y / n, z / n, w / n
+    return np.array([
+        [1 - 2 * (y * y + z * z), 2 * (x * y - z * w), 2 * (x * z + y * w)],
+        [2 * (x * y + z * w), 1 - 2 * (x * x + z * z), 2 * (y * z - x * w)],
+        [2 * (x * z - y * w), 2 * (y * z + x * w), 1 - 2 * (x * x + y * y)],
+    ], np.float64)
+
+
+def pose_matrix(position, orientation) -> np.ndarray:
+    """The 4x4 matrix that carries a thing from its own space into the world."""
+    m = np.eye(4)
+    m[:3, :3] = quat_to_matrix(tuple(orientation))
+    m[:3, 3] = position
+    return m
+
+
+def view_matrix(position, orientation) -> np.ndarray:
+    """The matrix that carries the world into an eye's space (the inverse of that eye's pose)."""
+    m = np.eye(4)
+    rot = quat_to_matrix(tuple(orientation))
+    m[:3, :3] = rot.T
+    m[:3, 3] = -rot.T @ np.asarray(position, np.float64)
+    return m
+
+
+def projection_matrix(angle_left: float, angle_right: float, angle_up: float, angle_down: float,
+                      near: float = 0.05, far: float = 100.0) -> np.ndarray:
+    """An OpenGL projection from OpenXR's field of view (four angles in radians; left and down are negative)."""
+    left, right = math.tan(angle_left), math.tan(angle_right)
+    up, down = math.tan(angle_up), math.tan(angle_down)
+    w, h = right - left, up - down
+    m = np.zeros((4, 4))
+    m[0, 0], m[0, 2] = 2.0 / w, (right + left) / w
+    m[1, 1], m[1, 2] = 2.0 / h, (up + down) / h
+    m[2, 2], m[2, 3] = -(far + near) / (far - near), -2.0 * far * near / (far - near)
+    m[3, 2] = -1.0
+    return m
+
+
+def yaw_matrix(radians: float) -> np.ndarray:
+    c, s = math.cos(radians), math.sin(radians)
+    m = np.eye(4)
+    m[0, 0], m[0, 2], m[2, 0], m[2, 2] = c, s, -s, c
+    return m
+
+
+def yaw_of(orientation) -> float:
+    """The heading (rotation about the vertical axis) of a pose, in radians: 0 looks down -z, positive turns left."""
+    fwd = quat_to_matrix(tuple(orientation)) @ np.array([0.0, 0.0, -1.0])
+    return math.atan2(-fwd[0], -fwd[2])
+
+
+# --- the virtual screen ---------------------------------------------------------------------------
+
+
+@dataclass
+class Screen:
+    """Where the virtual screen is, in the same world as the room.
+
+    ``distance`` is how far in front of where the viewer was when it was placed (``origin`` + ``heading``),
+    ``width`` is the picture's width in metres, and ``lift`` raises its centre above the viewer's eye height.
+    Its height follows from the picture's shape (``aspect``), so it is never squashed.
+    """
+
+    aspect: float = 16 / 9
+    distance: float = 3.0
+    width: float = 3.2
+    lift: float = 0.0
+    curve: float = 0.0                       # 0 flat; > 0 bends the sides toward the viewer (radians of arc)
+    origin: tuple[float, float, float] = (0.0, 1.6, 0.0)       # the viewer's head when it was placed
+    heading: float = 0.0                     # which way the viewer faced then (yaw)
+
+    MIN_WIDTH, MAX_WIDTH = 0.6, 14.0
+    MIN_DISTANCE, MAX_DISTANCE = 0.8, 12.0
+
+    @property
+    def height(self) -> float:
+        return self.width / max(0.2, self.aspect)
+
+    def centre(self) -> np.ndarray:
+        forward = yaw_matrix(self.heading)[:3, :3] @ np.array([0.0, 0.0, -1.0])
+        return np.asarray(self.origin) + forward * self.distance + np.array([0.0, self.lift, 0.0])
+
+    def model_matrix(self) -> np.ndarray:
+        """Unit quad (-0.5..0.5 in x and y, facing +z) -> world: sized, turned to face the viewer, and placed."""
+        m = yaw_matrix(self.heading)
+        m[:3, 3] = self.centre()
+        scale = np.diag([self.width, self.height, 1.0, 1.0])
+        return m @ scale
+
+    def resize(self, factor: float) -> None:
+        """Scale the picture about the viewer, keeping the angle it fills (so it looks bigger, not just nearer)."""
+        self.width = float(np.clip(self.width * factor, self.MIN_WIDTH, self.MAX_WIDTH))
+
+    def push(self, delta: float) -> None:
+        """Move it nearer (negative) or farther (positive), scaling with the distance so its size on the eye holds."""
+        new = float(np.clip(self.distance + delta, self.MIN_DISTANCE, self.MAX_DISTANCE))
+        self.width = float(np.clip(self.width * new / self.distance, self.MIN_WIDTH, self.MAX_WIDTH))
+        self.distance = new
+
+    def raise_by(self, delta: float) -> None:
+        self.lift = float(np.clip(self.lift + delta, -1.5, 2.5))
+
+    def recentre(self, head_position, head_orientation) -> None:
+        """Put it straight in front of where the viewer is now looking, at their eye height."""
+        self.origin = tuple(float(v) for v in head_position)
+        self.heading = yaw_of(head_orientation)
+
+
+def ray_hits_screen(screen: Screen, origin, direction) -> tuple[float, float, float] | None:
+    """Where a ray (a controller pointing) meets the screen: (distance, u, v) with u, v in 0..1 from the top left.
+
+    None if it misses, points away, or is parallel. The screen is treated as flat; a mild curve changes the hit
+    point by a few centimetres at the edges, which does not matter for pointing.
+    """
+    model = screen.model_matrix()
+    inverse = np.linalg.inv(model)
+    o = (inverse @ np.append(np.asarray(origin, np.float64), 1.0))[:3]
+    d = (inverse @ np.append(np.asarray(direction, np.float64), 0.0))[:3]
+    if abs(d[2]) < 1e-9:
+        return None
+    t = -o[2] / d[2]
+    if t <= 0:
+        return None
+    x, y = o[0] + t * d[0], o[1] + t * d[1]
+    if abs(x) > 0.5 or abs(y) > 0.5:
+        return None
+    # t is in model units; convert to metres along the ray (the direction was transformed with the scale)
+    world = np.asarray(origin, np.float64) + np.asarray(direction, np.float64) * t
+    metres = float(np.linalg.norm(world - np.asarray(origin, np.float64)))
+    return metres, x + 0.5, 0.5 - y
