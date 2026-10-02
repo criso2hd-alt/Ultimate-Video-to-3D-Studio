@@ -251,6 +251,10 @@ OpenGL session through `pyopenxr` (Apache-2.0) + `glfw` + `PyOpenGL` opened, rea
 (READY took ~12 s from launch). Recommended 2064 x 2272 per eye. Use OpenGL (D3D11 would need COM from Python).
 Eye order confirmed on the headset: the first view from `view_loop` is the LEFT eye (red), the second the RIGHT
 (blue). Note the Quest's proximity sensor puts it to sleep if it is not worn or covered: hold it when testing.
+Stereo confirmed in the headset (2026-10-02): the test card's OUT squares come toward the viewer and BEHIND ones sink
+away, 72 fps steady for a minute. The owner is modelling a custom baked room in Blender: its file contract is in
+`docs/vr-room-spec.md` (GLB + lit / dim / screen-only bakes, `Screen`, `Seat_*`, `BiasGlow`, `FloorMirror`); the
+procedural room in `vr/renderer.py` is the stand-in until it arrives.
 Not yet checked: SteamVR and Virtual Desktop runtimes (`XR_RUNTIME_JSON=<json>` selects one for a single process
 without touching the system setting).
 The runtime prints a lot of its own log to stdout: never parse stdout for results.
