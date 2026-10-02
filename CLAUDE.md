@@ -235,8 +235,10 @@ first, more scenes later. No OpenXR on a Mac: it gets a WebXR page later (HTTPS 
 Meta/Oculus 1.208 (SteamVR and Virtual Desktop runtimes also installed). It offers OpenGL, D3D11 and Vulkan; an
 OpenGL session through `pyopenxr` (Apache-2.0) + `glfw` + `PyOpenGL` opened, reached FOCUSED and drew eye images
 (READY took ~12 s from launch). Recommended 2064 x 2272 per eye. Use OpenGL (D3D11 would need COM from Python).
+Eye order confirmed on the headset: the first view from `view_loop` is the LEFT eye (red), the second the RIGHT
+(blue). Note the Quest's proximity sensor puts it to sleep if it is not worn or covered: hold it when testing.
 Not yet checked: SteamVR and Virtual Desktop runtimes (`XR_RUNTIME_JSON=<json>` selects one for a single process
-without touching the system setting), and that left/right eyes are the right way round.
+without touching the system setting).
 The runtime prints a lot of its own log to stdout: never parse stdout for results.
 
 ## Planned for 0.2: macOS
