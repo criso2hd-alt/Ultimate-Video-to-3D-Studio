@@ -736,3 +736,28 @@ def test_smooth_refinement_is_flat_inside_objects_but_keeps_the_outline():
     assert depthmod.refine_work(depthmod.SMOOTH_HIGH) == depthmod.REFINE_HIGH
     assert depthmod.refine_work(depthmod.SMOOTH_HIGH, preview=True) == depthmod.REFINE_FAST
     assert depthmod.refine_work(depthmod.STANDARD) == depthmod.REFINE_FAST
+
+
+def test_a_silent_clip_keeps_showing_pictures_when_it_loops(tmp_path):
+    """The clock must start over with the pictures, or every frame after the first pass is late and dropped."""
+    from test_video import _make_clip
+
+    from ultimate_video_3d import video
+    from ultimate_video_3d.player import Clock, FrameFeeder
+
+    clip = tmp_path / "silent.mp4"
+    _make_clip(clip, frames=24, audio=False)                                  # one second, no sound
+    info = video.probe(clip)
+    clock, shown = Clock(), []
+    started = time.monotonic()
+    feeder = FrameFeeder(clip, info, clock, lambda rgb, index, ms: shown.append(time.monotonic() - started))
+    feeder.start()
+    feeder.seek(0, True)
+    time.sleep(0.3)
+    clock.start(0.0)
+    feeder.play()
+    time.sleep(3.0)
+    feeder.shutdown()
+    assert sum(1 for t in shown if t > 1.6) > 10                              # still showing pictures on the later passes
+    assert feeder.stats["dropped"] < 100                                      # not spinning through thousands of late frames
+    assert clock.now() < 1700                                                 # the clock wrapped with the video

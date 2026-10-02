@@ -203,6 +203,10 @@ class FrameFeeder(threading.Thread):
                     frame = next(frames)
                 except StopIteration:
                     frames, _ = start_at(0.0, False)                # loop; the audio loops itself
+                    # A clip with no sound has no audio clock to wrap: the system clock would run on past the end
+                    # while the pictures start again from 0, every frame would then be "late" and dropped, and the
+                    # decoder would spin flat out showing nothing. Start the clock over with the pictures.
+                    self._clock.set(0.0)
                     continue
                 ms = frame_ms(frame)
                 now = self._clock.now()
