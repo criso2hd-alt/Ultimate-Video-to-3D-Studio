@@ -700,8 +700,25 @@ def test_conversion_refuses_to_start_if_the_banner_data_was_edited(monkeypatch, 
         next(pipeline.convert_video(tmp_path / "a.mp4", tmp_path / "b.mp4", settingsmod.AppSettings()))
 
 
-def test_depth_refinement_is_flat_inside_objects_but_keeps_the_outline():
-    """Texture in the picture must not leak into the depth (it made mottled maps and ragged halos)."""
+def test_standard_refinement_is_the_original_single_guided_filter():
+    """The default must stay exactly what gave excellent 3D: one picture-steered guided filter at 640 px."""
+    import cv2
+
+    from ultimate_video_3d import depth as depthmod
+
+    rng = np.random.default_rng(2)
+    frame = rng.random((360, 640, 3)).astype(np.float32)
+    depth = rng.random((518, 518)).astype(np.float32)
+    guide = cv2.cvtColor(frame, cv2.COLOR_RGB2GRAY)
+    small = cv2.resize(depth, (640, 360), interpolation=cv2.INTER_CUBIC)
+    expect = np.clip(depthmod.guided_filter(guide, small, 4, 2e-3), 0, 1)
+    got = depthmod.refine(depth, frame, True, 0.0)
+    assert np.allclose(got, expect, atol=1e-5)
+    assert depthmod.refine(depth, frame, True, 0.0, depthmod.STANDARD).shape == (360, 640)
+
+
+def test_smooth_refinement_is_flat_inside_objects_but_keeps_the_outline():
+    """In the optional smooth mode, picture texture must not leak into the depth."""
     from ultimate_video_3d import depth as depthmod
 
     rng = np.random.default_rng(5)
@@ -709,9 +726,13 @@ def test_depth_refinement_is_flat_inside_objects_but_keeps_the_outline():
     frame = np.clip(0.5 + 0.25 * rng.standard_normal((h, w, 3)), 0, 1).astype(np.float32)   # heavy texture everywhere
     depth = np.zeros((518, 518), np.float32)
     depth[130:400, 160:360] = 0.8                                                       # one near object
-    out = depthmod.refine(depth, frame, True, 0.0)
+    out = depthmod.refine(depth, frame, True, 0.0, depthmod.SMOOTH)
     inside = out[130:240, 250:390]                                                      # well inside it (rows 90-278, cols 198-445 at this size)
     assert inside.std() < 0.02                                                           # flat, not mottled
     assert out[180, 100] < 0.1 and out[180, 300] > 0.7                                   # outline still where it was
     assert out.shape == (h, w) and out.dtype == np.float32
-    assert depthmod.refine(depth, frame, True, 0.0, depthmod.REFINE_HIGH).shape == (h, w)
+    high = depthmod.refine(depth, frame, True, 0.0, depthmod.SMOOTH_HIGH, depthmod.REFINE_HIGH)
+    assert high.shape == (h, w)
+    assert depthmod.refine_work(depthmod.SMOOTH_HIGH) == depthmod.REFINE_HIGH
+    assert depthmod.refine_work(depthmod.SMOOTH_HIGH, preview=True) == depthmod.REFINE_FAST
+    assert depthmod.refine_work(depthmod.STANDARD) == depthmod.REFINE_FAST

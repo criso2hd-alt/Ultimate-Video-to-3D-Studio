@@ -77,6 +77,7 @@ class PreviewParams:
     temporal: float = 60.0
     edge_aware: bool = True
     depth_blur: float = 0.0
+    depth_mode: str = "standard"
     colour: grade.ColourSettings = field(default_factory=grade.ColourSettings)
     force_cpu: bool = False
 
@@ -266,7 +267,8 @@ def render_frame(p: PreviewParams, frame: np.ndarray, steady: np.ndarray | None,
     scope = _u8(_shrink(graded, 240))
     if steady is None:
         return PreviewResult([stereo.pack_frame("copy", None, graded, None, 8)], "", False, scope)
-    d = depthmod.refine(steady, frame, p.edge_aware, p.depth_blur / 100.0 * 6.0)
+    mode = depthmod.SMOOTH if p.depth_mode != depthmod.STANDARD else depthmod.STANDARD
+    d = depthmod.refine(steady, frame, p.edge_aware, p.depth_blur / 100.0 * 6.0, mode)
     pair = stereo.synthesize(graded, d, p.stereo)
     images, badge, wiggle = build_views(p, pair, d, graded)
     orbit = p.mode == "orbit"

@@ -948,6 +948,7 @@ class MainWindow(QMainWindow):
         self._params = PreviewParams(
             mode=self._effective_mode(), layout=s.threed.layout, stereo=s.threed.params(),
             temporal=s.threed.temporal, edge_aware=s.threed.edge_aware, depth_blur=s.threed.depth_blur,
+            depth_mode=s.threed.depth_quality,
             colour=s.colour.copy(), force_cpu=s.force_cpu_depth,
         )
         self.player.set_buffer_config(self._params if self._params.needs_depth else None, s.preview_buffer)

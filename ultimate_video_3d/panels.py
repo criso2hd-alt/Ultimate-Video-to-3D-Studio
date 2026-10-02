@@ -366,14 +366,16 @@ class ThreeDPanel(ModuleCard):
         self.edge.setToolTip("Aligns the depth map's edges with the image's edges. Removes halos around people.")
         self.edge.toggled.connect(lambda on: self._set("edge_aware", on))
         self.quality = QComboBox()
-        self.quality.addItem("High (cleaner depth)", "high")
-        self.quality.addItem("Fast", "fast")
+        self.quality.addItem("Standard", "standard")
+        self.quality.addItem("Smoother objects", "smooth")
+        self.quality.addItem("Smoother, more detail (slower export)", "smooth_high")
         self.quality.setCurrentIndex(max(0, self.quality.findData(s.depth_quality)))
-        self.quality.setToolTip("How carefully the depth map is cleaned when converting. High is a little slower. "
-                                "The live preview always uses Fast, so it stays responsive.")
+        self.quality.setToolTip("How the depth map is cleaned up. Standard is the original. Smoother objects flattens the inside of "
+                                "people and things, which can look cleaner on busy footage. The last one is the "
+                                "same at a larger size when converting; the preview stays quick.")
         self.quality.currentIndexChanged.connect(lambda: self._set("depth_quality", self.quality.currentData()))
         self.quality_row = QWidget()                      # a layout cannot be shown/hidden with the Advanced toggle
-        row = _row("Depth quality", self.quality)
+        row = _row("Depth cleanup", self.quality)
         row.setContentsMargins(0, 0, 0, 0)
         self.quality_row.setLayout(row)
         self.swap = QCheckBox("Swap left / right eyes")

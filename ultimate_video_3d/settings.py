@@ -27,8 +27,8 @@ class ThreeDSettings:
     temporal: float = 60.0
     edge_aware: bool = True         # snap depth edges to the picture's edges
     depth_blur: float = 0.0         # 0..100, softens depth to hide artefacts
-    #: "high" refines the depth at a larger size in the export (the preview always uses the fast one).
-    depth_quality: str = "high"
+    #: Depth cleanup: "standard" (the original), "smooth" or "smooth_high" (see depth.refine).
+    depth_quality: str = "standard"
 
     def params(self) -> stereo.StereoParams:
         return stereo.StereoParams(

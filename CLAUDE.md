@@ -125,12 +125,12 @@ Things that each cost a debugging session:
 - The histogram scales by the 98.5th percentile of the interior bins, not the tallest: a
   letterboxed frame puts a third of its pixels in bin 0 and flattened everything else to a sliver.
 
-- **Depth refinement** (`depth.refine`): median -> depth-steered guided filter (flattens each object) -> small
-  picture-steered guided filter (snaps only the outline). The old single picture-steered filter dragged texture
-  (carpet, cloth, hair) into the depth: mottled maps and ragged haloed silhouettes, visibly worse than a
-  paid competitor's smooth depth on the same clip. `work` is its width: `REFINE_FAST` (640, the live preview) or
-  `REFINE_HIGH` (960, exports when `ThreeDSettings.depth_quality == "high"`, the default; +~25 ms/frame).
-  Tuned by eye on sample frames with people; do not swap the filter order without re-checking silhouettes.
+- **Depth refinement** (`depth.refine`, `ThreeDSettings.depth_quality`): the default `standard` is the original single
+  picture-steered guided filter at 640 px - it gave excellent *3D results* in real use, so leave it the default.
+  `smooth` / `smooth_high` (opt-in, Advanced > Depth cleanup) first median-filter and flatten each object with a
+  depth-steered filter, then snap only the outline: much cleaner *depth maps* (the standard filter drags picture
+  texture into them), but the final stereo differs little, and it costs ~7 ms/frame (640 px) or ~25 ms (960 px,
+  exports only; the preview always uses 640). Lesson: judge depth changes by the rendered 3D, not the depth map.
 
 ## Conventions
 

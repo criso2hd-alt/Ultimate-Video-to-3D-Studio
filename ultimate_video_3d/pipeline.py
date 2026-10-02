@@ -278,7 +278,9 @@ def convert_video(
                                  "Encoding with ") + encoders.encoder_label(encoder))
 
     grader = grade.GradeEngine()
-    refine_work = depthmod.REFINE_HIGH if threed.depth_quality == "high" else depthmod.REFINE_FAST
+    refine_mode = threed.depth_quality if threed.depth_quality in (depthmod.SMOOTH, depthmod.SMOOTH_HIGH) \
+        else depthmod.STANDARD
+    refine_work = depthmod.refine_work(refine_mode)
     params = threed.params()
     bits = 16 if writer.ten_bit else 8
 
@@ -313,7 +315,7 @@ def convert_video(
             if steady is not None:
                 # Refinement snaps depth edges to the picture's. It runs here, on
                 # the warp thread, so the depth thread only has the model to feed.
-                d = depthmod.refine(steady, frame, threed.edge_aware, threed.depth_blur / 100.0 * 6.0, refine_work)
+                d = depthmod.refine(steady, frame, threed.edge_aware, threed.depth_blur / 100.0 * 6.0, refine_mode, refine_work)
 
             graded = grader.apply(frame, settings.colour, signal) if settings.colour.active else frame
             pair = stereo.synthesize(graded, d, params) if threed.enabled else None
