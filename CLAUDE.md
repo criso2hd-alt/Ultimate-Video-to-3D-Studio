@@ -225,6 +225,20 @@ from this same list.
 - Still to do: deinterlace and 3:2 pulldown for DVD (needs a real DVD to check), audio-track / subtitle choice,
   pause and resume for movie-length copies and conversions, Blu-ray playlists that repeat one clip (decoys).
 
+## VR (planned for 0.2, Windows first)
+
+Native OpenXR player, integrated (not a file you open elsewhere): *Preview in VR* renders a ~5 s clip at export
+settings and loops it muted until the headset is worn (session state FOCUSED); a button or Space starts it with
+sound. The Library plays in VR too. A simple room (reflective floor, walls tinted by the video's colours) comes
+first, more scenes later. No OpenXR on a Mac: it gets a WebXR page later (HTTPS needed), same branch, platform-gated.
+**Spike result** (`scripts/vr_probe.py`, `scripts/vr_spike.py`, 2026-10-02): Quest 3 over Link, active runtime
+Meta/Oculus 1.208 (SteamVR and Virtual Desktop runtimes also installed). It offers OpenGL, D3D11 and Vulkan; an
+OpenGL session through `pyopenxr` (Apache-2.0) + `glfw` + `PyOpenGL` opened, reached FOCUSED and drew eye images
+(READY took ~12 s from launch). Recommended 2064 x 2272 per eye. Use OpenGL (D3D11 would need COM from Python).
+Not yet checked: SteamVR and Virtual Desktop runtimes (`XR_RUNTIME_JSON=<json>` selects one for a single process
+without touching the system setting), and that left/right eyes are the right way round.
+The runtime prints a lot of its own log to stdout: never parse stdout for results.
+
 ## Planned for 0.2: macOS
 
 macOS is written but untested (0.2 will test it on an Apple Silicon MacBook Pro).
