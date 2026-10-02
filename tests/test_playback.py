@@ -421,7 +421,7 @@ def test_timeline_buffer_bar_state(qapp):
 def test_settings_cards_reflow_into_columns_without_overlap(qapp):
     win = appmod.MainWindow()
     try:
-        win.tabs.setCurrentIndex(1)
+        win.tabs.setCurrentWidget(win.settings_page)                 # by widget: tab positions change as tabs are added
         win.show()
         cols = win.settings_page.columns
         seen = {}

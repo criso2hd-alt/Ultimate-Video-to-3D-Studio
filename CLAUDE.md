@@ -209,6 +209,19 @@ smoothing has settled, then writes only new frames; at the end the segments are 
 (`join_segments` keeps decode times strictly rising - a two-frame segment has no B-frame delay). A different
 encoder than the one that made the segments discards them. Errors also keep progress. Disc-direct conversions
 never resume (forward-only). Stale jobs (>14 days) are swept at launch. The Stop button reads "Pause" for files.
+**Library tab** (`library.py` data, `librarypage.py` UI): a grid of the person's 3D videos with a player beside it.
+New conversions are added automatically (`MainWindow._record_conversion`, also from the batch dialog), and the
+person can add their own ("Add videos..."); a layout is guessed for those from the file name and shape
+(`guess_layout`) and can be changed from the right-click menu. Nothing is copied: `library.json` in the data dir
+just remembers paths, layout and a few facts; thumbnails (one eye) are cut lazily on a one-thread pool.
+On a normal screen the player offers only **Original** (as stored) and **Anaglyph** (`library.view_of`, eyes
+split by `split_eyes`, half layouts stretched back); it reuses `player.FrameFeeder` + `Clock` with Qt audio.
+Remove = forget; Delete = Recycle Bin (`send_to_trash`; never a permanent delete; nothing happens if the bin
+fails). Windows will not move an open file, so a delete first closes the player *and waits for its decode
+thread*, holds the thumbnail lock, and retries for ~2 s **with the event loop running** (Qt's audio backend
+releases a file only when its events are delivered - a plain sleep keeps the lock). Do not look tabs up by
+position (`tabs.setCurrentWidget`): Library sits between Video and Settings. The VR player (planned) will play
+from this same list.
 - Still to do: deinterlace and 3:2 pulldown for DVD (needs a real DVD to check), audio-track / subtitle choice,
   pause and resume for movie-length copies and conversions, Blu-ray playlists that repeat one clip (decoys).
 

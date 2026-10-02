@@ -81,6 +81,10 @@ QListWidget#onboardingSources {
 }
 QListWidget#onboardingSources::item { padding: 5px; }
 QListWidget#onboardingSources::item:selected { background: $panel_hi; color: $ink; }
+QListWidget#libraryGrid { background: transparent; border: none; outline: none; }
+QListWidget#libraryGrid::item { color: $ink; border: 1px solid transparent; border-radius: 10px; padding: 4px; }
+QListWidget#libraryGrid::item:hover { background: $panel_lo; }
+QListWidget#libraryGrid::item:selected { background: $panel_hi; border: 1px solid $signal; color: $ink; }
 
 QFrame#dropZone {
     border: 2px dashed $line; border-radius: 16px;

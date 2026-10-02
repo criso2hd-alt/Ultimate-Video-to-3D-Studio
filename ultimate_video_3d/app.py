@@ -38,7 +38,9 @@ from PySide6.QtWidgets import (
 )
 
 from .discdialog import DiscDialog
+from . import library as librarymod
 from . import resume as resumemod
+from .librarypage import LibraryPage
 from . import APP_TITLE, __version__, bootstrap, cloud, models, onboarding, support, updates, depth as depthmod, encoders, paths, pipeline, stereo, sysinfo, video, warmup
 from .controls import PreviewView, SystemGauge
 from .panels import ColourPanel, ExportPanel, LutPanel, ThreeDPanel, open_folder
@@ -289,6 +291,8 @@ class BatchWorker(QObject):
 class BatchDialog(QDialog):
     """Queue several videos and convert them with the current settings."""
 
+    converted = Signal(object, object)         # (source, output) for each finished video
+
     def __init__(self, parent: QWidget, settings: AppSettings, gpus: list, style: str) -> None:
         super().__init__(parent)
         self.setWindowTitle("Convert several videos")
@@ -382,6 +386,7 @@ class BatchDialog(QDialog):
         self._worker.started.connect(self._file_started)
         self._worker.frame_done.connect(self._frame)
         self._worker.done.connect(lambda s, o: self.status.setText(f"Finished {Path(s).name}"))
+        self._worker.done.connect(self.converted)
         self._worker.failed.connect(lambda s, m: self.status.setText(f"{Path(s).name}: {m}"))
         self._worker.finished.connect(self._finished)
         self._thread.start()
@@ -747,8 +752,13 @@ class MainWindow(QMainWindow):
         self.tabs = QTabWidget()
         self.tabs.setObjectName("mainTabs")
         self.tabs.setDocumentMode(True)
+        self.library = librarymod.Library()
+        self.library_page = LibraryPage(self.library)
+        self.library_page.message.connect(lambda text: self.status.showMessage(text))
         self.tabs.addTab(self.video_page, "Video")
+        self.tabs.addTab(self.library_page, "Library")
         self.tabs.addTab(self.settings_page, "Settings")
+        self.tabs.currentChanged.connect(self._tab_changed)
         self.tab_apply = QPushButton("+  Convert several")
         self.tab_apply.setObjectName("tabAction")
         self.tab_apply.setCursor(Qt.CursorShape.PointingHandCursor)
@@ -1710,9 +1720,25 @@ class MainWindow(QMainWindow):
         page.stop.setVisible(False)
         page.bar.setVisible(False)
 
+    def _record_conversion(self, output, source_name: str = "") -> None:
+        """List a finished video in the Library (its layout is whatever 3D layout was chosen)."""
+        try:
+            layout = self.settings.threed.layout if self.settings.threed.enabled else ""
+            self.library.add_converted(Path(output), layout, source_name)
+            self.library_page.refresh()
+        except Exception:  # noqa: BLE001 - the Library is a convenience; a finished video is never lost to it
+            pass
+
+    def _tab_changed(self, index: int) -> None:
+        if self.tabs.widget(index) is not self.library_page:
+            self.library_page.pause()                    # leaving the Library stops its video
+
     def _finished(self, output) -> None:
         self._teardown()
         output = Path(output)
+        page = self.video_page
+        self._record_conversion(output, page.disc_stream.stem if page.disc_stream is not None
+                                else (page.source.name if page.source else ""))
         self.video_page.info_label.setText(f"Saved {output.name}")
         self.status.showMessage(f"Video saved: {output}")
         box = QMessageBox(QMessageBox.Icon.Information, "Conversion complete", f"Saved to:\n{output}", parent=self)
@@ -1742,7 +1768,9 @@ class MainWindow(QMainWindow):
         if not video.is_available():
             self._download_video_support(then=self.open_batch)
             return
-        BatchDialog(self, self.settings, self.gpus, style_for(self.settings.theme)).exec()
+        dialog = BatchDialog(self, self.settings, self.gpus, style_for(self.settings.theme))
+        dialog.converted.connect(lambda source, output: self._record_conversion(output, Path(source).name))
+        dialog.exec()
 
     # -- PyAV download -----------------------------------------------------
 
@@ -1811,6 +1839,7 @@ class MainWindow(QMainWindow):
             self._thread.quit()
             self._thread.wait(15000)
         self.player.shutdown()
+        self.library_page.shutdown()
         self.engine.shutdown()
         if self._monitor is not None:
             self._monitor.close()
