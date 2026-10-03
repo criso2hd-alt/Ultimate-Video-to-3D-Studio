@@ -29,3 +29,5 @@ settings.json
 docs/room-template/room_template.blend
 docs/room-template/*.blend1
 docs/room-template/*backup*.blend
+docs/room-template/Textures/
+room-build/
