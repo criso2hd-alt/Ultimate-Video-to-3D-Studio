@@ -209,7 +209,33 @@ def _prefer_srgb_swapchain() -> None:
     OpenGLGraphics.select_color_swapchain_format = staticmethod(select)
 
 
-from . import NO_HEADSET  # noqa: E402  (shared with the controller, which must not import this OpenGL module)
+from . import NO_HEADSET, XR_LOCK  # noqa: E402  (shared with the controller, which must not import this OpenGL module)
+
+
+class GuardedContext:
+    """pyopenxr's ContextObject, started under ``XR_LOCK`` and cleaned up if the start-up fails half way.
+
+    Without the lock a headset probe can create and destroy another OpenXR instance in the middle of this one's start-up;
+    without the clean-up a start-up that stops half way leaves its instance behind, and the runtime then refuses every later
+    try (LimitReachedError) until the app is restarted. The lock is let go as soon as the session exists.
+    """
+
+    def __init__(self, context) -> None:
+        self._context = context
+
+    def __enter__(self):
+        with XR_LOCK:
+            try:
+                return self._context.__enter__()
+            except BaseException:
+                try:
+                    self._context.__exit__(None, None, None)         # free whatever the failed start-up had made
+                except Exception:  # noqa: BLE001 - best effort
+                    pass
+                raise
+
+    def __exit__(self, exc_type, exc_value, traceback):
+        return self._context.__exit__(exc_type, exc_value, traceback)
 
 
 def friendly_error(error: BaseException) -> str:
@@ -350,8 +376,8 @@ class VRSession(QObject):
             enabled_extension_names=[xr.KHR_OPENGL_ENABLE_EXTENSION_NAME])
         space = xr.ReferenceSpaceCreateInfo(reference_space_type=xr.ReferenceSpaceType.STAGE)
         _prefer_srgb_swapchain()
-        with ContextObject(context_provider=GLFWOffscreenContextProvider(), instance_create_info=info,
-                           reference_space_create_info=space) as ctx:
+        with GuardedContext(ContextObject(context_provider=GLFWOffscreenContextProvider(), instance_create_info=info,
+                                          reference_space_create_info=space)) as ctx:
             inputs = _Inputs(ctx)
             renderer = Renderer()
             renderer.init_gl()
@@ -528,6 +554,13 @@ class VRSession(QObject):
     def set_audio_label(self, label: str | None) -> None:
         """Where the film's sound goes, shown on the menu's Sound row (None hides the row)."""
         self.menu.set_audio(label)
+
+    def set_rooms(self, tiles: list, current: str | None = None) -> None:
+        """The rooms on the menu's Rooms page (any thread; replaced as a whole)."""
+        self.menu.set_rooms(tiles, current)
+
+    def set_current_room(self, folder: str) -> None:
+        self.menu.set_current_room(folder)
 
     def set_videos(self, tiles: list) -> None:
         """The Library, as shown on the menu's Videos page (any thread; replaced as a whole)."""

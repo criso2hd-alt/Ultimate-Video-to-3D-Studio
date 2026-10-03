@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import sys
+import time
 from pathlib import Path
 
 import pytest
@@ -76,6 +77,12 @@ class FakeSession(QObject):
 
     def set_beam(self, on, level):
         self.beam = (on, level)
+
+    def set_rooms(self, tiles, current=None):
+        self.room_tiles, self.room_current = list(tiles), current
+
+    def set_current_room(self, folder):
+        self.room_current = folder
 
     def start(self):
         self.running = True
@@ -313,3 +320,139 @@ def test_the_projector_beam_setting_reaches_the_headset_and_the_headsets_choice_
     vr.beam_changed.connect(lambda on, level: heard.append((on, level)))
     vr._on_menu_action(("beam", False, 0.25))                                  # the person switched it in the headset
     assert heard == [(False, 0.25)] and (vr.beam_on, vr.beam_level) == (False, 0.25)
+
+
+def test_a_session_that_starts_by_itself_still_sits_in_the_chosen_room(qapp, tmp_path):
+    vr = _controller(qapp)
+    loaded = []
+
+    def fake_use_room(folder):
+        loaded.append(folder)
+        vr.room = object()
+        return True
+
+    vr.use_room = fake_use_room
+    vr.room_provider = lambda: tmp_path / "home_theatre"
+    vr.watch(True)                                                             # a headset appears: the session starts without anyone pressing Play in VR
+    assert _wait(qapp, lambda: vr.session is not None and vr.session.running)
+    assert loaded == [tmp_path / "home_theatre"] and vr.session.rooms == [vr.room]
+    vr.watch(False)
+
+
+def test_without_a_room_to_offer_a_session_starts_in_the_plain_room_as_before(qapp):
+    vr = _controller(qapp)
+    vr.room_provider = lambda: None
+    vr.watch(True)
+    assert _wait(qapp, lambda: vr.session is not None and vr.session.running)
+    assert vr.session.rooms == [] and vr.room is None
+    vr.watch(False)
+
+
+def test_a_real_failure_is_shown_once_and_the_app_does_not_keep_trying_by_itself(qapp):
+    probes = []
+    vr = _controller(qapp, probe=lambda: probes.append(1) or True)
+    failures = []
+    vr.failed.connect(failures.append)
+    vr.watch(True)
+    assert _wait(qapp, lambda: vr.session is not None and vr.session.running)
+    vr.session.running = False
+    vr.session.failed.emit("LimitReachedError: the runtime supports no more of the requested resource.")
+    for _ in range(5):                                                          # the timer would have probed again, and again
+        vr._poll()
+        qapp.processEvents()
+    time.sleep(0.2)
+    qapp.processEvents()
+    assert len(failures) == 1 and len(probes) == 1                              # one box, and no second try that would pile on
+    vr.watch(True)                                                              # asked for again (the Library tab opened): it tries once more
+    assert _wait(qapp, lambda: len(probes) == 2)
+    vr.watch(False)
+
+
+def test_the_headset_probe_leaves_the_runtime_alone_while_a_session_is_starting(monkeypatch):
+    import sys
+    import types
+
+    from ultimate_video_3d import vr as vrpkg
+
+    monkeypatch.setattr(vrpkg, "available", lambda: True)
+
+    class Untouchable:
+        def __getattr__(self, name):
+            raise AssertionError("the runtime was touched during a start-up")
+
+    monkeypatch.setitem(sys.modules, "xr", Untouchable())
+    with vrpkg.XR_LOCK:
+        assert vrpkg.headset_present() is False
+
+    calls = []
+    fake = types.SimpleNamespace(
+        InstanceCreateInfo=lambda **k: k, ApplicationInfo=lambda **k: k, XR_CURRENT_API_VERSION=1,
+        SystemGetInfo=lambda **k: k, FormFactor=types.SimpleNamespace(HEAD_MOUNTED_DISPLAY=1),
+        create_instance=lambda info: calls.append("create") or "instance",
+        get_system=lambda instance, info: calls.append("system"),
+        destroy_instance=lambda instance: calls.append("destroy"))
+    monkeypatch.setitem(sys.modules, "xr", fake)
+    assert vrpkg.headset_present() is True and calls == ["create", "system", "destroy"]
+    assert vrpkg.XR_LOCK.acquire(blocking=False)                                # and the lock is free again afterwards
+    vrpkg.XR_LOCK.release()
+
+
+def test_a_session_start_is_guarded_and_a_failed_one_is_cleaned_up_so_the_next_try_is_not_refused():
+    from ultimate_video_3d import vr as vrpkg
+    from ultimate_video_3d.vr.session import GuardedContext
+
+    class Context:
+        def __init__(self, fail):
+            self.fail, self.entered, self.exited = fail, False, []
+            self.locked_inside = None
+
+        def __enter__(self):
+            self.locked_inside = not vrpkg.XR_LOCK.acquire(blocking=False)     # True: the lock was held during the start-up
+            if not self.locked_inside:
+                vrpkg.XR_LOCK.release()
+            if self.fail:
+                raise RuntimeError("GraphicsRequirementsCallMissingError")
+            self.entered = True
+            return self
+
+        def __exit__(self, *args):
+            self.exited.append(args)
+
+    good = Context(fail=False)
+    with GuardedContext(good) as ctx:
+        assert ctx is good and good.locked_inside is True
+        assert vrpkg.XR_LOCK.acquire(blocking=False)                             # the lock is let go once the session exists
+        vrpkg.XR_LOCK.release()
+    assert len(good.exited) == 1
+
+    bad = Context(fail=True)
+    with pytest.raises(RuntimeError, match="GraphicsRequirements"):
+        with GuardedContext(bad):
+            pass
+    assert len(bad.exited) == 1                                                  # what the failed start-up made was freed
+    assert vrpkg.XR_LOCK.acquire(blocking=False)                                 # and the lock was released for the next try
+    vrpkg.XR_LOCK.release()
+
+
+def test_the_rooms_to_choose_from_reach_the_headset_and_a_choice_made_there_is_carried_out_and_reported(vr, tmp_path):
+    from ultimate_video_3d.vr.menu import Tile
+
+    tiles = [Tile("Home theatre", str(tmp_path / "a")), Tile("Grand cinema", str(tmp_path / "b"))]
+    vr.set_rooms(tiles)                                                         # before VR has started: kept for when it does
+    vr.start()
+    assert vr.session.room_tiles == tiles
+    used, chosen = [], []
+    vr.use_room = lambda folder: used.append(folder) or True
+    vr.room_chosen.connect(chosen.append)
+    vr._on_menu_action(("room", tiles[1]))
+    assert used == [tmp_path / "b"] and chosen == [str(tmp_path / "b")]
+
+
+def test_a_room_that_cannot_be_loaded_is_not_reported_as_chosen(vr, tmp_path):
+    from ultimate_video_3d.vr.menu import Tile
+
+    chosen = []
+    vr.room_chosen.connect(chosen.append)
+    vr.start()
+    vr._on_menu_action(("room", Tile("Broken", str(tmp_path))))                  # a folder with no room.glb: use_room says so and fails
+    assert chosen == []

@@ -8,6 +8,13 @@ anywhere else.
 from __future__ import annotations
 
 import sys
+import threading
+
+#: Held while an OpenXR instance is being created and turned into a session, and by every headset probe. The Meta runtime keeps
+#: some of its state for the whole process: a probe that created and destroyed its own instance in the middle of a start-up made
+#: it forget that the graphics requirements had been asked for (GraphicsRequirementsCallMissingError), and a half-finished start-up
+#: that was never cleaned up made the next one fail with LimitReachedError.
+XR_LOCK = threading.Lock()
 
 
 NO_HEADSET = ("No VR headset was found. Please connect your headset (on a Quest: start Link or Air Link and "
@@ -50,6 +57,8 @@ def headset_present() -> bool:
     """
     if not available():
         return False
+    if not XR_LOCK.acquire(blocking=False):
+        return False                                     # a session is being set up right now: not the moment to poke the runtime
     try:
         import xr
 
@@ -63,6 +72,8 @@ def headset_present() -> bool:
             xr.destroy_instance(instance)
     except Exception:  # noqa: BLE001 - no runtime, no headset, a runtime that is still starting: all "not now"
         return False
+    finally:
+        XR_LOCK.release()
 
 
 def available() -> bool:

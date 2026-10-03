@@ -73,6 +73,9 @@ class FakeVR:
     def set_beam(self, on, level):
         self.calls.append(("beam", on, level))
 
+    def set_rooms(self, tiles):
+        self.calls.append(("rooms", [t.title for t in tiles]))
+
 
 @pytest.fixture()
 def win(qapp, monkeypatch, tmp_path):
@@ -267,3 +270,18 @@ def test_the_projector_beam_choice_is_saved_and_a_damaged_value_is_ignored(tmp_p
     (tmp_path / "s.json").write_text(json.dumps(raw))
     damaged = AppSettings.load(tmp_path / "s.json")
     assert damaged.vr_beam is True and damaged.vr_beam_level == 2.0                  # not a switch: ignored; too bright: held at the top
+
+
+def test_the_headsets_room_page_is_filled_from_the_rooms_folder_and_a_pick_is_remembered(win, tmp_path):
+    import json
+
+    for folder, name in (("home_theatre", "Home theatre"), ("grand_cinema", "Grand cinema")):
+        (tmp_path / "rooms" / folder).mkdir(parents=True)
+        (tmp_path / "rooms" / folder / "room.glb").write_bytes(b"glTF")
+        (tmp_path / "rooms" / folder / "room.json").write_text(json.dumps({"name": name}))
+    win.vr.calls.clear()
+    win._push_vr_rooms()
+    assert win.vr.calls[-1] == ("rooms", ["Grand cinema", "Home theatre"])
+    win._vr_room_chosen(str(tmp_path / "rooms" / "grand_cinema"))
+    assert win.settings.vr_room_dir == str(tmp_path / "rooms" / "grand_cinema")
+    assert win._vr_room_dir() == tmp_path / "rooms" / "grand_cinema"                 # and it is the room the next session starts in

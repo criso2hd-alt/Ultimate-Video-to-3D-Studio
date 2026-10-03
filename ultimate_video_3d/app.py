@@ -829,7 +829,9 @@ class MainWindow(QMainWindow):
         self.library_page = LibraryPage(self.library)
         self.library_page.message.connect(lambda text: self.status.showMessage(text))
         self.vr = VRController(self)
+        self.vr.room_provider = self._vr_room_dir                   # a session that starts by itself still sits in the chosen room
         self.vr.notice.connect(lambda text: self.status.showMessage(text))
+        self.vr.room_chosen.connect(self._vr_room_chosen)
         from .vr import unavailable_reason
 
         reason = unavailable_reason()
@@ -1952,6 +1954,28 @@ class MainWindow(QMainWindow):
             picture = QImage(str(thumb)) if thumb.is_file() else None
             tiles.append(Tile(entry.title, entry.path, entry.layout, entry.detail, picture))
         self.vr.set_videos(tiles)
+        self._push_vr_rooms()
+
+    def _push_vr_rooms(self) -> None:
+        """Give the headset's menu the rooms it can sit in: every folder with a room.glb under the data folder's rooms, with its picture."""
+        if not hasattr(self.vr, "set_rooms"):
+            return
+        from PySide6.QtGui import QImage
+
+        from .vr import rooms as roomsmod
+        from .vr.menu import Tile
+
+        tiles = []
+        for entry in roomsmod.find_rooms(paths.data_dir() / "rooms"):
+            picture = QImage(str(entry.thumbnail)) if entry.thumbnail is not None else None
+            tiles.append(Tile(entry.name, str(entry.folder), "", "", picture))
+        self.vr.set_rooms(tiles)
+
+    def _vr_room_chosen(self, folder: str) -> None:
+        """A room was picked in the headset: it is the one to start in next time, too."""
+        self.settings.vr_room_dir = folder
+        self.settings.save(paths.settings_path())
+        self._refresh_vr_settings()
 
     def _play_in_vr(self, entry) -> None:
         """Show a Library video in the headset, in the chosen room."""

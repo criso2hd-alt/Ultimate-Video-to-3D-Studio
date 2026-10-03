@@ -388,6 +388,16 @@ reports, per eye picture, how much of each side is black in all of them (a row i
 and subtitles can only make bars look smaller; one row of bar is kept). `VRMedia` scans in a background thread when a film opens, `VRMedia.crop` /
 `.aspect` give the real picture, the renderer shows `crop_rect(rect, crop)` (so the glow and beam follow) and the room's screen fits that shape.
 Settings > VR > "Cut the black bars off wide films" (`vr_trim_bars`). Not applied to conversions. Desktop preview unchanged.
+**Starting VR safely, and choosing the room (2026-10-03, after "GraphicsRequirementsCallMissingError" and "LimitReachedError" in the headset).**
+The Meta runtime keeps state per *process*: the 5-second headset probe (`vr.headset_present`: create an instance, ask for the system, destroy
+it) could run in the middle of a session's start-up and make it forget the graphics requirements had been asked for; and a start-up that
+stopped half way left its instance behind, so every later try was refused. Now `vr.XR_LOCK` is held by the probe (non-blocking: it simply skips)
+and by `session.GuardedContext` (wraps pyopenxr's ContextObject: starts under the lock, frees a half-made start-up, lets go once the session
+exists). A real failure also stops the automatic retrying (`VRController._on_failed` pauses watching until VR is asked for again). A session
+that starts by itself (headset appeared) used to open in the plain built-in room because only Play in VR loaded the chosen room:
+`VRController.room_provider` (the app's `_vr_room_dir`) now loads it in `start()`. Rooms page: `vr/rooms.py` lists the folders under data/rooms with a
+room.glb (name from room.json, picture from `thumbnail.jpg|png` / `preview.jpg|png` in the room folder), the menu shows a Rooms button
+(only with more than one room) and a 3x2 Rooms page, a pick calls `use_room` live (seat and film stay) and `room_chosen` saves it as `vr_room_dir`.
 **Home theatre screen is now cinematic (room v4).** `scripts/blender/set_screen_size.py` makes a copy of the .blend with only the Screen quad resized
 (6.6 x 2.76 m, 2.39:1, same bottom edge) and `bake_room.py --phase export` re-exports into a copy of the bake folder: nothing is re-baked and every
 other piece (groups, glow planes, seats, lens) is identical to v3 (checked). The owner's own .blend files are untouched; their working file still has

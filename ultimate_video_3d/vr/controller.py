@@ -51,6 +51,7 @@ class VRController(QObject):
     seats_changed = Signal(list)            # [(name, label)] once a room is loaded
     failed = Signal(str)
     audio_choice_changed = Signal(str)      # the person chose a sound device in the headset ("" = automatic): save it
+    room_chosen = Signal(str)               # the person picked another room in the headset (its folder): remember it
     beam_changed = Signal(bool, float)      # the person switched the projector beam or changed its brightness in the headset: save it
     _probed = Signal(bool)                  # a headset probe finished (queued onto the UI thread)
 
@@ -61,6 +62,8 @@ class VRController(QObject):
         self._probe_fn = probe or headset_present
         self._audio_outputs_fn = audio_outputs or qt_audio_outputs
         self.audio_choice = ""               # "" = automatic (the headset's device if there is one)
+        self._room_tiles: list = []                     # the Rooms page's choices
+        self.room_provider = None                       # () -> the folder of the room to sit in, or None (the app's choice); used when VR starts by itself
         self.trim_bars = True                           # leave a film's burned-in black bars off the screen (the app's settings fill this in)
         self.beam_on, self.beam_level = True, 1.0       # the projector's beam in the room (the app's settings fill these in)
         self._watching = self._paused = self._probing = False
@@ -117,6 +120,8 @@ class VRController(QObject):
         self.session.stopped.connect(self._on_stopped)
         self.session.menu_action.connect(self._on_menu_action)
         self.session.set_videos(self._tiles)
+        if hasattr(self.session, "set_rooms"):
+            self.session.set_rooms(self._room_tiles, str(self._room_folder or ""))
         if hasattr(self.media, "set_volume"):
             self.media.set_volume(self._volume)
         if hasattr(self.media, "failed"):
@@ -140,7 +145,15 @@ class VRController(QObject):
         if self.session is not None:
             self.session.set_room(self.room)
             self.seats_changed.emit(self.session.seat_names())
+            if hasattr(self.session, "set_current_room"):
+                self.session.set_current_room(str(self._room_folder or ""))
         return True
+
+    def set_rooms(self, tiles: list) -> None:
+        """The rooms to offer on the headset's Rooms page (Tile list; UI thread)."""
+        self._room_tiles = list(tiles)
+        if self.session is not None and hasattr(self.session, "set_rooms"):
+            self.session.set_rooms(self._room_tiles, str(self._room_folder or ""))
 
     def start(self) -> bool:
         """Start the headset session (once). False, with a notice, if VR is not available on this computer."""
@@ -148,6 +161,10 @@ class VRController(QObject):
             self.notice.emit("VR is not available: it needs Windows, an OpenXR runtime (Meta Link, SteamVR or "
                              "Virtual Desktop) and the VR components.")
             return False
+        if self.room is None and self.room_provider is not None:       # a session that starts by itself (a headset appeared) still sits in the room
+            folder = self.room_provider()
+            if folder:
+                self.use_room(folder)
         self._make_parts()
         if self.room is not None:
             self.session.set_room(self.room)
@@ -217,6 +234,10 @@ class VRController(QObject):
             self._volume = float(action[1])
             if self.media is not None and hasattr(self.media, "set_volume"):
                 self.media.set_volume(self._volume)
+        elif kind == "room":
+            tile = action[1]
+            if self.use_room(Path(tile.path)):
+                self.room_chosen.emit(str(tile.path))
         elif kind == "audio":
             self.cycle_audio(int(action[1]))
         elif kind == "beam":
@@ -347,6 +368,7 @@ class VRController(QObject):
         if self._watching and message == NO_HEADSET:
             self._set_state("off")                        # quietly waiting for a headset: not an error, try again soon
             return
+        self._paused = True                               # no automatic retry after a real failure: one box, then wait to be asked again
         self.failed.emit(message)
         self.notice.emit(f"VR stopped: {message}")
         self._set_state("off")

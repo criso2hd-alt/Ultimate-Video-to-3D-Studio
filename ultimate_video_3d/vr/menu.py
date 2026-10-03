@@ -10,7 +10,7 @@ lights, seat, volume, exit), ``videos`` (the Library, three by two thumbnails a 
 Pressing a button returns an *action* tuple for whoever owns the headset to carry out, or None when the press was only
 about the menu itself (changing page, paging through videos):
     ("play",)  ("video", Tile)  ("lights", "auto"|"on"|"off")  ("volume", 0..1)  ("seat", +1|-1)  ("recentre",)
-    ("exit",)  ("close",)  ("screenshot",)  ("audio", +1|-1)  ("beam", on, level)
+    ("exit",)  ("close",)  ("screenshot",)  ("audio", +1|-1)  ("beam", on, level)  ("room", Tile)
 """
 
 from __future__ import annotations
@@ -73,6 +73,8 @@ class Menu:
         self.lights = "auto"
         self.volume = 1.0
         self.tiles: list[Tile] = []
+        self.rooms: list[Tile] = []         # the rooms to choose from (title = name, path = folder, thumb = its picture)
+        self.current_room = ""              # the folder of the room the person is in now
         self.video_page = 0
         self.help_left = 0.0                # seconds until the help card closes itself; 0 = it stays
         self.has_beam = False               # the room has a projector: show the Beam row
@@ -132,6 +134,16 @@ class Menu:
         if values != (self.playing, self.title, self.has_media, self.has_lights, self.seat_label, self.has_seats):
             (self.playing, self.title, self.has_media, self.has_lights, self.seat_label, self.has_seats) = values
             self._dirty = True
+
+    def set_rooms(self, rooms: list[Tile], current: str | None = None) -> None:
+        self.rooms = list(rooms)
+        if current is not None:
+            self.current_room = current
+        self._dirty = True
+
+    def set_current_room(self, folder: str) -> None:
+        if folder != self.current_room:
+            self.current_room, self._dirty = folder, True
 
     def set_tiles(self, tiles: list[Tile]) -> None:
         self.tiles = list(tiles)
@@ -197,6 +209,12 @@ class Menu:
             self.video_page = (self.video_page + int(button[6:])) % self.page_count
             self._dirty = True
             return None
+        if button.startswith("room:"):
+            index = int(button[5:])
+            if 0 <= index < len(self.rooms):
+                tile = self.rooms[index]
+                self.close()
+                return None if tile.path == self.current_room else ("room", tile)       # the room you are in: just close the menu
         if button.startswith("video:"):
             index = int(button[6:])
             if 0 <= index < len(self.tiles):
@@ -233,7 +251,7 @@ class Menu:
         p.setPen(QPen(LINE, 3))
         p.setBrush(PANEL)
         p.drawRoundedRect(QRectF(3, 3, W - 6, H - 6), 36, 36)
-        {"help": self._help_page, "videos": self._videos_page}.get(self.page, self._main_page)(p)
+        {"help": self._help_page, "videos": self._videos_page, "rooms": self._rooms_page}.get(self.page, self._main_page)(p)
         p.end()
         self._image = canvas.convertToFormat(QImage.Format.Format_RGBA8888)
         self._dirty = False
@@ -275,9 +293,14 @@ class Menu:
         self._header(p, "Ultimate Video to 3D Studio",
                      (f"{'Playing' if self.playing else 'Paused'}: {self.title}" if self.has_media else "Nothing is playing yet."))
         top = 140
-        self._button(p, "play", QRectF(48, top, 380, 100), "Pause" if self.playing else "Play", style="primary", pixels=44)
-        self._button(p, "page:videos", QRectF(450, top, 380, 100), "Videos", pixels=44)
-        self._button(p, "page:help", QRectF(852, top, 380, 100), "Help", pixels=44)
+        names = [("play", "Pause" if self.playing else "Play"), ("page:videos", "Videos")]
+        if len(self.rooms) > 1:                                  # a choice of rooms only when there is a choice
+            names.append(("page:rooms", "Rooms"))
+        names.append(("page:help", "Help"))
+        width = (W - 96 - 22 * (len(names) - 1)) / len(names)
+        for i, (button, label) in enumerate(names):
+            self._button(p, button, QRectF(48 + i * (width + 22), top, width, 100), label,
+                         style="primary" if button == "play" else "normal", pixels=44)
         y, pitch, height = 252, 74, 62
         if self.has_lights:
             self._text(p, QRectF(48, y, 200, height), "Lights", 34, INK, bold=True)
@@ -348,6 +371,34 @@ class Menu:
         if self.page_count > 1:
             self._button(p, "vpage:-1", QRectF(48, 690, 260, 70), "< Previous", pixels=28)
             self._button(p, "vpage:1", QRectF(W - 308, 690, 260, 70), "Next >", pixels=28)
+
+    def _rooms_page(self, p: QPainter) -> None:
+        self._header(p, "Choose your room", "Pick where you want to watch.", back=True)
+        for slot, tile in enumerate(self.rooms[:PER_PAGE]):
+            col, row = slot % 3, slot // 3
+            x, y = 40 + col * 410, 130 + row * 265
+            rect = QRectF(x, y, 380, 245)
+            self._buttons.append(_Button(f"room:{slot}", rect))
+            here = tile.path == self.current_room
+            hot = self.hover == f"room:{slot}"
+            p.setPen(QPen(SIGNAL if hot or here else LINE, 6 if here else 5 if hot else 2))
+            p.setBrush(RAISED_HOT if hot else RAISED)
+            p.drawRoundedRect(rect, 18, 18)
+            picture = QRectF(x + 10, y + 10, 360, 160)
+            if tile.thumb is not None and not tile.thumb.isNull():
+                scaled = tile.thumb.scaled(360, 160, Qt.AspectRatioMode.KeepAspectRatioByExpanding, Qt.TransformationMode.SmoothTransformation)
+                p.save()
+                p.setClipRect(picture)
+                p.drawImage(QRectF(picture.center().x() - scaled.width() / 2, picture.center().y() - scaled.height() / 2,
+                                   scaled.width(), scaled.height()), scaled)
+                p.restore()
+            else:
+                p.setPen(Qt.PenStyle.NoPen)
+                p.setBrush(QColor("#0a1220"))
+                p.drawRoundedRect(picture, 10, 10)
+                self._text(p, picture, tile.title, 30, DIM, align=Qt.AlignmentFlag.AlignCenter)
+            self._text(p, QRectF(x + 14, y + 172, 352, 38), tile.title, 27, INK, bold=True)
+            self._text(p, QRectF(x + 14, y + 208, 352, 30), "You are here" if here else tile.detail, 21, SIGNAL if here else DIM)
 
     def _help_page(self, p: QPainter) -> None:
         self._header(p, "How to use the headset", "Point a controller at a button and pull the trigger.")
