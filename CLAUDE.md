@@ -373,6 +373,16 @@ ray with five planes and sums 8 haze samples, tinted by the part of the picture 
 and the *lens* (`_LENS_FS`: a camera-facing sprite, as bright as the picture). The beam alone has an on/off switch and a brightness
 (`BEAM_LEVELS` 25%..200%): the headset menu's Beam row, Settings > Virtual reality, `settings.vr_beam` / `vr_beam_level`,
 `VRController.set_beam` / `beam_changed`. The lens always glows. Do not name a renderer method `_draw_beam`: that is the pointer ray.
+**Next rooms (2026-10-03): blockouts made, owner models them.** `scripts/blender/make_blockout.py imax|drivein <out.blend>` writes a rough
+starting file in the home theatre's layout (never overwrites; `--force` to). *Grand Cinema* (`room_imax_blockout.blend`): a huge IMAX
+house, screen 28 x 14.7 m (1.9:1), 20 stadium rows (1.2 m tread, 0.3 m riser), only the centre seat of each row (`Seat_R<k>_Centre`,
+`REF_SeatSlot_R<k>`), ribbed side walls, sloping ceiling, the five BiasGlow planes; row 10 is the sweet spot (~53 degrees).
+*Drive-in* (`room_drivein_blockout.blend`): open-air, 15 x 8.44 m screen on a tower, two parking ramps, a Chevy pickup and a Cadillac with open
+cabins and two seats each (`Seat_Truck_*`, `Seat_Cadillac_*`, labelled), window speakers (`AudioSource_Speaker_*` empties for a future tinny-
+speaker audio filter), filler cars, `Sky_Dome` for the HDRI, a projector booth 60 m back (`Projector_Lens`). To do in the app for them:
+(1) the depth limit for big screens (behind-screen separation must stay under ~6.3 cm: only ~0.2% of a 28 m screen), (2) scale the glow
+reach and the beam falloff by screen size / throw (both are tuned for the 5 m screen and a 7 m throw), (3) `bake_room.py` GROUPS/default
+seat are home-theatre specific and need a per-room config.
 Idea agreed but not built: many films are 2.35:1 with the bars burned into a 16:9 frame; detect those bars and fit the real picture
 area, and make the room's Screen object 2.35:1 (Blender change + screen-light re-bake only).
 **Pointer rays are drawn last, on top, without depth test** (`renderer.draw_eye`, 5-element tuples (origin, direction, length,
