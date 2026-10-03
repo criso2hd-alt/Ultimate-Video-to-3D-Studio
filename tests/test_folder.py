@@ -287,3 +287,23 @@ def test_converting_a_ripped_title_keeps_the_chosen_audio_and_subtitle_in_an_mkv
     assert [t.language for t in got_subs] == ["fre"] and got_subs[0].title == "Français"
     info = video.probe(out)
     assert (info.width, info.height) == (320, 180) and info.has_audio          # a real converted picture, with its sound
+
+
+def test_save_as_says_mp4_and_goes_back_to_it_when_the_subtitle_that_asked_for_mkv_is_dropped_or_the_file_changes(qapp, tmp_path):
+    rip = make_rip(tmp_path / "t.mkv")
+    audio, subs = video.list_tracks(rip)
+    panel = _panel()
+    panel.family_box.setCurrentIndex(panel.family_box.findData("h265"))
+    assert panel.container_box.itemText(0) == "MP4"                           # not "same as the format": say which
+    panel.set_tracks(audio, subs)
+    panel.subtitle_box.setEnabled(True)
+    panel.subtitle_box.setCurrentIndex(1)
+    assert panel._s.container == "mkv"                                         # a subtitle needs it ...
+    panel.subtitle_box.setCurrentIndex(0)
+    assert panel._s.container == "auto" and panel.container_box.currentData() == "auto"      # ... and no subtitle gives MP4 back
+    panel.subtitle_box.setCurrentIndex(1)
+    panel.set_tracks(audio, subs)                                              # opening another file
+    assert panel._s.container == "auto"
+    panel.container_box.setCurrentIndex(panel.container_box.findData("mkv"))   # chosen by the person: it stays
+    panel.set_tracks(audio, subs)
+    assert panel._s.container == "mkv"

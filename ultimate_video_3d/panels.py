@@ -488,6 +488,8 @@ class ExportPanel(ModuleCard):
         # The tracks of the open file, once there is one: which sound to keep and which subtitles (see video.list_tracks).
         self._audio_tracks: list = []
         self._subtitle_tracks: list = []
+        self._auto_mkv = False                    # "Save as" went to MKV by itself, because a subtitle was chosen (and goes back by itself)
+        self._switching = False
         self.audio_track_box = QComboBox()
         self.audio_track_box.currentIndexChanged.connect(self._audio_track)
         self.audio_track_row = _row("Audio track", self.audio_track_box)
@@ -501,12 +503,12 @@ class ExportPanel(ModuleCard):
         self.subtitle_row = _row("Subtitles", self.subtitle_box)
         self.add_layout(self.subtitle_row)
         self.container_box = QComboBox()
-        self.container_box.addItem("Same as the format", "auto")
+        self.container_box.addItem("MP4", "auto")                  # the formats above are the MP4 ones: H.264 / H.265 / AV1 / VP9 in MP4
         self.container_box.addItem("Matroska (MKV)", "mkv")
         self.container_box.setCurrentIndex(max(0, self.container_box.findData(s.container)))
         self.container_box.currentIndexChanged.connect(self._container)
-        self.container_box.setToolTip("MKV keeps subtitles and lossless audio (TrueHD, DTS-HD) exactly as they are; MP4 turns that "
-                                      "sound into AAC and cannot hold subtitles.")
+        self.container_box.setToolTip("MP4 plays everywhere, but turns TrueHD / DTS sound into AAC and cannot hold subtitles. MKV keeps "
+                                      "subtitles and lossless sound (TrueHD, DTS-HD) exactly as they are.")
         self.container_row = _row("Save as", self.container_box)
         self.add_layout(self.container_row)
         self._show_track_rows()
@@ -535,6 +537,8 @@ class ExportPanel(ModuleCard):
     def set_tracks(self, audio: list, subtitles: list) -> None:
         """Show the tracks of the file that was just opened (video.Track lists) and go back to the defaults for it."""
         self._audio_tracks, self._subtitle_tracks = list(audio), list(subtitles)
+        if self._auto_mkv:
+            self._switch_container("auto", False)              # a new file: the MKV a subtitle asked for is not carried over to it
         self._s.audio_track = self._s.subtitle_track = -1
         for box in (self.audio_track_box, self.subtitle_box):
             box.blockSignals(True)
@@ -606,11 +610,22 @@ class ExportPanel(ModuleCard):
         self._s.subtitle_track = int(self.subtitle_box.currentData() if self.subtitle_box.currentData() is not None else -1)
         if self._s.subtitle_track >= 0 and self._s.container != "mkv" and \
                 encoders.FAMILIES_BY_KEY[self.family_box.currentData()].suffix == ".mp4":
-            self.set_container("mkv")                             # a subtitle can only be kept in an MKV: switch for them
+            self._switch_container("mkv", True)                   # a subtitle can only be kept in an MKV: switch for them
+        elif self._s.subtitle_track < 0 and self._auto_mkv:
+            self._switch_container("auto", False)                 # ... and back to MP4 when they no longer want one
         self._show_track_rows()
         self.changed.emit()
 
+    def _switch_container(self, container: str, automatic: bool) -> None:
+        """Change "Save as" ourselves (``automatic``: because of a subtitle choice, so it can be undone the same way)."""
+        self._switching = True
+        self.set_container(container)
+        self._switching = False
+        self._auto_mkv = automatic
+
     def _container(self) -> None:
+        if not self._switching:
+            self._auto_mkv = False                                # the person chose it: it stays until they change it
         self._s.container = self.container_box.currentData() or "auto"
         if self._s.container != "mkv" and self._s.subtitle_track >= 0 and \
                 encoders.FAMILIES_BY_KEY[self.family_box.currentData()].suffix == ".mp4":
