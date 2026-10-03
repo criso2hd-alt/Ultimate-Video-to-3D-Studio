@@ -40,7 +40,7 @@ GROUPS: dict[str, dict] = {
     "wall_left": {"objects": ["Wall_Right_Left"], "size": 4096},       # the side walls + stone; renamed from Wall_Left in the owner's file
     "walls_plaster": {"objects": ["Wall_Back", "Wall_Front", "Wall_Back.002", "Door2"], "size": 4096},
     "floor_carpet": {"objects": ["Floor"], "size": 4096},
-    "ceiling_panels": {"objects": ["Ceiling", "AcusticPanels"], "size": 4096},        # Ceiling.001 is never seen: not baked
+    "ceiling_panels": {"objects": ["Ceiling", "AcusticPanels", "Cylinder"], "size": 4096},   # Cylinder: the black rods that hold the panels up        # Ceiling.001 is never seen: not baked
     "chairs_details": {"objects": ["Home Theater Armchair N220224.008", "Text.001", "icon_transparent"], "size": 4096},
     "hall_floor": {"objects": ["Floor.001"], "size": 2048},        # only seen through the doors
 }
