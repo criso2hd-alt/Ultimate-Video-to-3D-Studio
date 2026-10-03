@@ -193,8 +193,9 @@ void main() {
     float outside = length(vec2(max(abs(d.x) - u_half.x, 0.0), max(abs(d.y) - u_half.y, 0.0)));
     vec3 near = (to_linear(u_top) * wt + to_linear(u_bottom) * wb + to_linear(u_left) * wl + to_linear(u_right) * wr)
                 / max(wt + wb + wl + wr, 1e-4);
-    // a tight halo that is gone before the quad's own edge (the margins are 0.5-0.7 m), so no rectangle shows
-    float glow = exp(-outside * 4.0) * smoothstep(0.0, 0.04, outside) * (1.0 - smoothstep(0.22, 0.48, outside));
+    // a halo that is gone before the quad's own edge, so no rectangle shows. The owner's glow plane now reaches almost to the
+    // wall edges (0.8-1.3 m beyond the screen), so the fade is long and soft: gone by 0.85 m (it was a tight 0.22-0.48 m)
+    float glow = exp(-outside * 2.4) * smoothstep(0.0, 0.05, outside) * (1.0 - smoothstep(0.40, 0.85, outside));
     colour = vec4(to_display(near * glow * u_strength), 1.0);               // added to what is already there
 }
 """

@@ -309,6 +309,24 @@ pole through the slot at y = -7.1). The new file is `docs/room-template/room_tem
 other room_template*.blend). Runtime beam, not built yet: a four-sided additive pyramid from the lens to the picture's corners
 (so it narrows for letterboxed films), brightness/tint from the picture, only while playing with the lights down, soft edges, a
 slow noise shimmer; the app needs nothing from the model but the `Projector_Lens` position.
+**The second bake (2026-10-03, `room-build/home_theatre_v2`, package `room-build/room_home_theatre_v2`).** What went wrong the first time and
+how `scripts/blender/bake_room.py` handles it now:
+- *Black wood (chair console, bin, wall-base framing)*: those pieces were inside-out (faces pointing into the solid; the imported chair is
+  stored mirrored). A bake lights a face from the side its normal points to, so they got no light; an ordinary render hides it by shading
+  both sides. `fix_inside_out` (called through `prepare()` in the bake AND the export phase, so the UV layouts still line up) flips, in memory,
+  each connected piece whose back looks out into open room while its front looks into an enclosed space (24 fixed hemisphere rays each way
+  from up to 48 faces; fixed seed; the .blend is never saved). The first versions of the test were wrong in instructive ways: "hits a back face"
+  misses a wholly inside-out solid, and "more free distance behind" flips hollow leather skins. Proven with a swap to plain emission (bakes)
+  vs plain Principled (stays black) vs flipping the faces (lit).
+- *Logo*: a Cycles bake does not composite a see-through sticker. `make_logo_opaque` forces its alpha to 1 for the chair-group bake only; then
+  `--phase logoinfo` writes `logo_info.json`, `composite_logo.py` lays the sticker onto the WALL atlas (lit, dim, screen-only, each with its
+  own exposure undone and redone) by the PNG's real alpha, and `EXPORT_SKIP` leaves the logo object out of room.glb. The wall keeps the glow the
+  logo casts (baked with the real see-through logo). Do not mix the `Lightbox` plate in: it is not visible in Blender's own render.
+- *Hallway*: group `hall` = Floor.001 + Wall_Back.002 at 6144 px (277 px/m; was 84 at 2048), which also frees the plaster-wall atlas.
+- Run order: `--only <group>` per group (lit, dim, screen), then `--phase logoinfo`, `python scripts/blender/composite_logo.py <dir>`, `--phase export`.
+  The output dir is made absolute (a relative one was resolved from the .blend's folder and the export could not find the images).
+- A bake stops at once if a visible mesh is in no group or a listed name is missing (`--allow-unbaked` overrides); `ProjectorLensGlow` is hidden in
+  every bake (the app will draw the beam and lens glow live).
 **Pointer rays are drawn last, on top, without depth test** (`renderer.draw_eye`, 5-element tuples (origin, direction, length,
 colour, landed) with a dot at the tip when `landed`). Depth-tested they were hidden piecemeal by chair backs and the console and
 looked "cut in half and shifted" in the headset; the menu panel also showed them ghosting through it. Reproduce without a

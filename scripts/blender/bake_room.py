@@ -38,14 +38,17 @@ import numpy as np
 # the pixels (half the edge). Group choice balances texel density (pixels per metre) so no atlas is stretched thin.
 GROUPS: dict[str, dict] = {
     "wall_left": {"objects": ["Wall_Right_Left"], "size": 4096},       # the side walls + stone; renamed from Wall_Left in the owner's file
-    "walls_plaster": {"objects": ["Wall_Back", "Wall_Front", "Wall_Back.002", "Door2"], "size": 4096},
+    "walls_plaster": {"objects": ["Wall_Back", "Wall_Front", "Door2"], "size": 4096},
     "floor_carpet": {"objects": ["Floor"], "size": 4096},
+    # Cylinder: the black rods that hold the panels up. Projector + Projector_Mount: the ceiling-hung projector (the
+    # Projector_Lens empty, where the beam starts, is not geometry and is not baked)
     "ceiling_panels": {"objects": ["Ceiling", "AcusticPanels", "Cylinder", "Projector", "Projector_Mount"], "size": 4096},
-    # Cylinder: the black rods that hold the panels up. Projector + Projector_Mount: the ceiling-hung projector (a stand-in box
-    # until the owner models it; the Projector_Lens empty, where the beam starts, is not geometry and is not baked)        # Ceiling.001 is never seen: not baked
     "chairs_details": {"objects": ["Home Theater Armchair N220224.008", "Text.001", "icon_transparent"], "size": 4096},
-    "hall_floor": {"objects": ["Floor.001"], "size": 2048},        # only seen through the doors
+    # The hallway seen through the doors: its floor and the long wood wall at the end. It was 84 px per metre (a 2048 atlas
+    # for a 24 m strip) against ~340 in the room; a 6144 atlas of just these two objects brings it level with the room.
+    "hall": {"objects": ["Floor.001", "Wall_Back.002"], "size": 6144},
 }
+EXPORT_SKIP = ("icon_transparent",)          # baked, then composited onto the wall (composite_logo.py); not exported as geometry
 NOT_BAKED_HIDDEN = ("BiasGlow",)            # drawn live by the app: must not paint the wall behind the screen
 GLOW_PREFIX = "BiasGlow"                    # ...and so is every object whose name starts with it (BiasGlow.001, BiasGlow_Floor...)
 LIGHT_COLLECTIONS = ("03_LIGHTS_LIT", "04_LIGHTS_DIM")
@@ -55,7 +58,10 @@ MARGIN_PX = 16
 
 #: Meshes that are deliberately not baked: the glow planes and the screen are drawn live, the reference figure is hidden, and
 #: the second ceiling is never seen.
-NOT_BAKED_OK = ("Screen", "REF_Person_1.75m", "Ceiling.001")
+NOT_BAKED_OK = ("Screen", "REF_Person_1.75m", "Ceiling.001", "ProjectorLensGlow")
+#: Hidden during every bake: ProjectorLensGlow is a bright emissive quad that only belongs while a film runs (the app draws
+#: the beam and the lens glow live), so it must neither be baked nor light the room in the bake.
+HIDDEN_IN_BAKE = ("ProjectorLensGlow", "REF_Person_1.75m")
 
 
 def uncovered_meshes() -> list[str]:
@@ -96,7 +102,9 @@ def log(*parts) -> None:
 
 
 def parse(argv: list[str]) -> dict:
-    out = {"dir": Path(argv[0]), "samples": 1024, "only": None, "states": ["lit", "dim", "screen"], "scale": 1.0,
+    # absolute: Blender resolves a relative image path from the .blend's folder, not from where it was started, and the export
+    # then cannot find the baked images that the bake runs wrote relative to the working folder
+    out = {"dir": Path(argv[0]).resolve(), "samples": 1024, "only": None, "states": ["lit", "dim", "screen"], "scale": 1.0,
            "phase": "bake"}
     i = 1
     while i < len(argv):
@@ -195,6 +203,172 @@ def apply_transforms(objs) -> None:
         outward = sum(p.normal.dot(p.center - centre) * p.area for p in mesh.polygons)
         log(f"{obj.name}: transforms applied" + (" (had a negative scale)" if flipped else "")
             + f"; outward-facing score {'+' if outward >= 0 else '-'}")
+
+
+_TREE = None
+
+
+def scene_tree():
+    """One BVH of everything that is solid in the room (world space), built once per run; used to tell which way a face looks."""
+    global _TREE
+    if _TREE is not None:
+        return _TREE
+    import bmesh  # noqa: F401  (imported here so a missing module fails early)
+    from mathutils.bvhtree import BVHTree
+
+    dg = bpy.context.evaluated_depsgraph_get()
+    verts, polys = [], []
+    for o in bpy.data.objects:
+        if (o.type != "MESH" or o.name in NOT_BAKED_OK or o.name.startswith((GLOW_PREFIX, "BeamGuide")) or o.hide_render):
+            continue
+        ev = o.evaluated_get(dg)
+        me = ev.to_mesh()
+        mw = o.matrix_world
+        base = len(verts)
+        verts += [tuple(mw @ v.co) for v in me.vertices]
+        flip = mw.to_3x3().determinant() < 0
+        for p in me.polygons:
+            ids = [base + i for i in p.vertices]
+            polys.append(ids[::-1] if flip else ids)
+        ev.to_mesh_clear()
+    _TREE = BVHTree.FromPolygons(verts, polys, all_triangles=False)
+    return _TREE
+
+
+def _hemisphere(count: int = 24):
+    """Fixed, repeatable directions on the +z hemisphere (cosine-weighted): the same on every run, so every run flips the same faces."""
+    from mathutils import Vector
+
+    golden = math.pi * (3 - math.sqrt(5))
+    return [Vector((math.sqrt((i + 0.5) / count) * math.cos(i * golden), math.sqrt((i + 0.5) / count) * math.sin(i * golden),
+                    math.sqrt(max(0.0, 1 - (i + 0.5) / count)))) for i in range(count)]
+
+
+def _free_fraction(tree, origin, normal, reach: float, dirs) -> float:
+    q = normal.to_track_quat("Z", "Y")
+    return sum(1 for d in dirs if tree.ray_cast(origin, q @ d, reach)[0] is None) / len(dirs)
+
+
+def fix_inside_out(objs) -> None:
+    """Flip, in memory, every connected piece of a mesh whose faces point into solid matter instead of out into the room.
+
+    Why: a bake lights a face from the side its normal points to. A piece that is inside-out (the imported chair is stored
+    mirrored, and its wood console, trim and metal parts came out that way) has nothing in front of it but the chair's
+    own body, so it bakes black - while an ordinary render hides the problem by shading both sides. The owner's first bake
+    lost the console wood and the wall-base framing exactly like this.
+
+    How it decides: from a few faces of each piece it sends rays out of both sides. The real outside is open room; the back of
+    a hollow skin looks into an enclosed cavity. A piece whose back is far more open than its front is flipped. Pieces that
+    are open on both sides (a wall plane) and pieces that are clearly right are left alone. The .blend is never saved.
+    """
+    import random
+
+    import bmesh
+
+    tree = scene_tree()
+    dirs = _hemisphere()
+    for obj in objs:
+        rng = random.Random(7)                                        # a fixed seed: the same faces are sampled every run
+        bm = bmesh.new()
+        bm.from_mesh(obj.data)
+        bm.faces.ensure_lookup_table()
+        seen: set[int] = set()
+        flipped_pieces = flipped_faces = 0
+        for face in bm.faces:
+            if face.index in seen:
+                continue
+            stack, piece = [face], []
+            seen.add(face.index)
+            while stack:
+                f = stack.pop()
+                piece.append(f)
+                for e in f.edges:
+                    for g in e.link_faces:
+                        if g.index not in seen:
+                            seen.add(g.index)
+                            stack.append(g)
+            picks = piece if len(piece) <= 48 else rng.sample(piece, 48)
+            votes_in = votes_out = 0
+            for f in picks:
+                n = f.normal
+                if n.length < 0.5:
+                    continue
+                c = f.calc_center_median()
+                front = _free_fraction(tree, c + n * 0.004, n, 1.0, dirs)
+                back = _free_fraction(tree, c - n * 0.004, -n, 1.0, dirs)
+                if abs(front - back) < 0.25:
+                    continue
+                if front > back:
+                    votes_out += 1
+                else:
+                    votes_in += 1
+            total = votes_in + votes_out
+            if total and total >= min(6, len(picks)) and votes_in > 0.7 * total:
+                bmesh.ops.reverse_faces(bm, faces=piece)
+                flipped_pieces += 1
+                flipped_faces += len(piece)
+        bm.to_mesh(obj.data)
+        bm.free()
+        obj.data.update()
+        if flipped_pieces:
+            log(f"{obj.name}: {flipped_pieces} inside-out pieces flipped ({flipped_faces} faces)")
+
+
+def prepare(objs) -> None:
+    """Everything done to a group's objects before they are unwrapped, baked or exported - the same in every run."""
+    apply_transforms(objs)
+    fix_inside_out(objs)
+
+
+def make_logo_opaque() -> None:
+    """Bake the back-wall logo as a fully opaque card. A Cycles bake does not composite a see-through surface over what is
+    behind it (it comes out black), so for the chair-group bake only, the logo's alpha is forced to 1; its see-through parts are
+    near-black and are masked out afterwards. scripts/blender/composite_logo.py then lays the logo onto the WALL's own atlas
+    using the PNG's real alpha, and the logo object is left out of the exported room, so the sticker keeps its outline and the
+    wall (with the glow the logo casts on it) shows around it - exactly as in Blender's own render."""
+    mat = bpy.data.materials.get("icon_transparent")
+    if mat is None or not mat.node_tree:
+        return
+    tree = mat.node_tree
+    logo = next((n for n in tree.nodes if n.bl_idname == "ShaderNodeBsdfPrincipled"), None)
+    if logo is None:
+        log("logo: material not in the expected shape; left as it is")
+        return
+    for link in list(tree.links):
+        if link.to_node == logo and link.to_socket.name == "Alpha":
+            tree.links.remove(link)
+    logo.inputs["Alpha"].default_value = 1.0
+    log("logo: alpha forced to 1 for the bake (composited onto the wall afterwards)")
+
+
+def write_logo_info(out: Path, report: dict) -> None:
+    """Facts the compositor needs: where the logo sits on the wall, how both are mapped into their atlases."""
+    info = {"png": bpy.path.abspath(bpy.data.images["icon_transparent.png"].filepath), "wall": None, "logo": None, "screen_ev": {}}
+    for group in ("walls_plaster", "chairs_details"):
+        info["screen_ev"][group] = report["groups"][group]["bakes"]["screen"]["screen_ev"]
+    wall_objs = [bpy.data.objects[n] for n in GROUPS["walls_plaster"]["objects"]]
+    chair_objs = [bpy.data.objects[n] for n in GROUPS["chairs_details"]["objects"]]
+    for group, objs in (("walls_plaster", wall_objs), ("chairs_details", chair_objs)):
+        make_visible(objs)
+        prepare(objs)
+        if not restore_layout(group, objs, Path(out)):
+            raise SystemExit(f"no saved UV layout for {group}")
+    logo_obj = bpy.data.objects["icon_transparent"]
+    slots = [sl.material.name if sl.material else None for sl in logo_obj.material_slots]
+    face = next(p for p in logo_obj.data.polygons if slots[p.material_index] == "icon_transparent")
+    bake_uv = logo_obj.data.uv_layers["BakeUV"].data
+    png_uv = logo_obj.data.uv_layers["UVMap"].data
+    info["logo"] = {
+        "corners": [list(logo_obj.data.vertices[i].co) for i in face.vertices],
+        "bake_uv": [list(bake_uv[i].uv) for i in face.loop_indices],
+        "png_uv": [list(png_uv[i].uv) for i in face.loop_indices],
+    }
+    wall = bpy.data.objects["Wall_Back"]
+    wuv = wall.data.uv_layers["BakeUV"].data
+    info["wall"] = {"tris": [{"pos": [list(wall.data.vertices[i].co) for i in p.vertices],
+                              "uv": [list(wuv[i].uv) for i in p.loop_indices]} for p in wall.data.polygons]}
+    (Path(out) / "logo_info.json").write_text(json.dumps(info, indent=1))
+    log("wrote logo_info.json")
 
 
 def unwrap(objs) -> None:
@@ -461,34 +635,36 @@ def main() -> None:
     report = load_report(out)
     report.update({"samples": opts["samples"], "view": view[0]})
 
+    if opts["phase"] == "logoinfo":
+        write_logo_info(out, report)
+        return
+
     if opts["phase"] == "export":
         done = {}
         for group, spec in GROUPS.items():
             objs = [bpy.data.objects[n] for n in spec["objects"]]
             make_visible(objs)
-            apply_transforms(objs)
+            prepare(objs)
             if not restore_layout(group, objs, out):
                 raise SystemExit(f"no saved UV layout for {group}: bake it first")
-            done[group] = {"objects": spec["objects"], **report["groups"].get(group, {})}
+            done[group] = {**report["groups"].get(group, {}), "objects": [n for n in spec["objects"] if n not in EXPORT_SKIP]}
         finish_and_export(done, out)
         write_manifest(out, report)
         log("ALL DONE (export)")
         return
 
     configure_cycles(opts["samples"])
-    switches = Switches()
     for obj in bpy.data.objects:
-        if obj.name in NOT_BAKED_HIDDEN or obj.name.startswith(GLOW_PREFIX):
+        if obj.name in NOT_BAKED_HIDDEN or obj.name.startswith(GLOW_PREFIX) or obj.name in HIDDEN_IN_BAKE:
             obj.hide_render = True
-    if "REF_Person_1.75m" in bpy.data.objects:
-        bpy.data.objects["REF_Person_1.75m"].hide_render = True
+    switches = Switches()
 
     for group, spec in GROUPS.items():
         if opts["only"] and group not in opts["only"]:
             continue
         objs = [bpy.data.objects[n] for n in spec["objects"]]
         make_visible(objs)
-        apply_transforms(objs)
+        prepare(objs)
         size = max(256, int(spec["size"] * opts["scale"]) // 64 * 64)
         if restore_layout(group, objs, out):
             coverage, density = uv_density(objs, size)
@@ -504,6 +680,8 @@ def main() -> None:
                 log(f"{group}: UV coverage only {coverage:.0%}; unwrapping again (attempt {attempt + 2})")
             save_layout(group, objs, out)
             log(f"{group}: {len(objs)} objects, UV coverage {coverage:.0%}, {density:.0f} px per metre at {size}px (layout saved)")
+        if group == "chairs_details":
+            make_logo_opaque()                                     # only for this group: the wall must be baked with the real, see-through logo
         entry = report["groups"].setdefault(group, {"bakes": {}})
         entry.update({"objects": spec["objects"], "size": size, "uv_coverage": round(coverage, 3), "px_per_m": round(density)})
         for state in opts["states"]:

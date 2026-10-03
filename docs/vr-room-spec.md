@@ -3,7 +3,7 @@
 > **As built (2026-10-02):** the owner's home theatre was baked in **six groups** (not one atlas), each with its own UV
 > layout and three pictures: `wall_left` (stone, 4K), `walls_plaster` (plaster walls and doors, 4K), `floor_carpet` (4K),
 > `ceiling_panels` (ceiling and acoustic panels, 4K), `chairs_details` (armchairs, logo text and icon, 4K) and
-> `hall_floor` (seen only through the doors, 2K). Lit and dim bakes are full size, the screen-only bake is half the edge.
+> `hall` (the hallway seen through the doors: its floor and end wall, 6K). Lit and dim bakes are full size, the screen-only bake is half the edge.
 > Everything below about "one material, one atlas" is the *minimum*; the loader handles any number of groups: a group is a
 > material named `Bake_<group>` whose `room.json` entry names its pictures. The bake is `scripts/blender/bake_room.py`
 > (run per group, then `--phase export`; see its docstring). The package is `room.glb` (lit bakes embedded) + `room.json` +
