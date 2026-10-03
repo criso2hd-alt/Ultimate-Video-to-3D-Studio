@@ -44,6 +44,12 @@ class VideoProgress:
     message: str = ""
 
 
+def output_suffix(export) -> str:
+    """The output file's extension: the format's own, or .mkv when the person asked for Matroska (only the MP4 formats offer it)."""
+    family = encoders.FAMILIES_BY_KEY[export.family]
+    return ".mkv" if export.container == "mkv" and family.suffix == ".mp4" else family.suffix
+
+
 def output_path_for(source: Path, settings: AppSettings, folder: Path | None = None) -> Path:
     family = encoders.FAMILIES_BY_KEY[settings.export.family]
     tag = ""
@@ -51,7 +57,7 @@ def output_path_for(source: Path, settings: AppSettings, folder: Path | None = N
         tag = stereo.LAYOUTS_BY_KEY[settings.threed.layout].tag
     else:
         tag = "_converted"
-    return (folder or paths.output_dir()) / f"{source.stem}{tag}{family.suffix}"
+    return (folder or paths.output_dir()) / f"{source.stem}{tag}{output_suffix(settings.export)}"
 
 
 def eye_size(info: video.VideoInfo, settings: AppSettings) -> tuple[int, int]:
@@ -360,12 +366,13 @@ def convert_video(
     window_len = (done / info.fps) if trimming else None
     audio_source = source.audio_path if from_disc else source
     if audio_source is None:                                 # a disc title with no sound we could keep
-        shutil.copy2(video_only, destination)
+        video.carry_video(video_only, destination)
         had_audio = False
     else:
         had_audio = video.mux_audio(
             audio_source, video_only, destination, window_start, window_len,
-            audio=export.audio, suffix=family.suffix,
+            audio=export.audio, suffix=destination.suffix.lower(),
+            audio_index=export.audio_track, subtitle_index=export.subtitle_track,
         )
     if from_disc:
         source.discard()

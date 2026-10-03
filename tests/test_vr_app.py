@@ -63,6 +63,13 @@ class FakeVR:
     def stop(self):
         self.calls.append("stop")
 
+    def start(self):
+        self.calls.append("start")
+        return True
+
+    def watch(self, on):
+        self.calls.append(("watch", on))
+
 
 @pytest.fixture()
 def win(qapp, monkeypatch, tmp_path):
@@ -97,7 +104,7 @@ def test_the_library_fades_play_in_vr_out_when_vr_cannot_work_here(win, clip):
     page.grid.clearSelection()
     page.grid.setCurrentItem(None)
     page._selected(None)
-    assert not page.vr_button.isEnabled()                                      # nothing chosen: nothing to play
+    assert page.vr_button.isEnabled()                                          # nothing chosen: still goes into VR, to pick a video there
 
 
 def test_play_in_vr_pauses_the_local_player_and_hands_the_video_to_the_window(win, clip, monkeypatch):
@@ -185,3 +192,39 @@ def test_a_missing_headset_is_reported_as_please_connect_it(win, monkeypatch):
     monkeypatch.setattr(appmod.QMessageBox, "information", lambda *a: shown.append(a[2]))
     win._vr_failed(sessionmod.NO_HEADSET)
     assert shown == [sessionmod.NO_HEADSET]
+
+
+def test_play_in_vr_with_nothing_selected_goes_in_and_leaves_the_choice_to_the_headset(win, clip):
+    page = win.library_page
+    page.add_files([clip])
+    page.grid.clearSelection()
+    page.grid.setCurrentItem(None)
+    page._selected(None)
+    page.set_vr_available(True)
+    asked = []
+    page.vr_requested.connect(asked.append)
+    page.vr_button.click()
+    assert asked == [None]
+    win._play_in_vr(None)
+    assert "start" in win.vr.calls and not any(isinstance(c, tuple) and c[0] == "show" for c in win.vr.calls)
+    assert ("videos", 1) in win.vr.calls                                       # the Library was handed to the headset's menu
+
+
+def test_the_library_tab_gets_ready_for_the_headset_and_leaving_it_stops_looking(win, qapp):
+    win.library_page.set_vr_available(True)
+    win.settings.vr_auto_connect = True
+    win.tabs.setCurrentWidget(win.library_page)
+    assert ("watch", True) in win.vr.calls
+    win.tabs.setCurrentWidget(win.video_page)
+    assert win.vr.calls[-1] == ("watch", False)
+    win.settings.vr_auto_connect = False                                       # the person switched it off in Settings
+    win.vr.calls.clear()
+    win.tabs.setCurrentWidget(win.library_page)
+    assert ("watch", True) not in win.vr.calls and ("watch", False) in win.vr.calls
+
+
+def test_the_settings_switch_for_getting_ready_is_saved(win):
+    win.settings_page.vr_auto.setChecked(False)
+    assert win.settings.vr_auto_connect is False
+    win.settings_page.vr_auto.setChecked(True)
+    assert win.settings.vr_auto_connect is True

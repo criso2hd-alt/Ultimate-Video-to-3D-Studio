@@ -143,6 +143,10 @@ class VRMedia(QObject):
     def muted(self) -> bool:
         return self._output.isMuted()
 
+    def set_audio_device(self, device) -> None:
+        """Play through this Qt audio output device (UI thread). A change takes effect at once, even mid-film."""
+        self._output.setDevice(device)
+
     def set_volume(self, volume: float) -> None:
         """0..1 (UI thread). Qt's volume is linear in amplitude; the ear is not, so square it for an even-feeling slider."""
         self._output.setVolume(min(1.0, max(0.0, volume)) ** 2)

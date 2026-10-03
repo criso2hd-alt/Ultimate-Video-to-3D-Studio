@@ -226,6 +226,22 @@ from this same list.
 - Still to do: deinterlace and 3:2 pulldown for DVD (needs a real DVD to check), audio-track / subtitle choice,
   pause and resume for movie-length copies and conversions, Blu-ray playlists that repeat one clip (decoys).
 
+## Folders of rips, audio tracks and subtitles (0.2)
+
+Source card > "Open a folder of videos..." (`folderdialog.FolderDialog`): lists every video under a folder (3 levels down,
+`MIN_BYTES` 2 MB to skip menu loops) longest first, each with its audio and subtitle tracks; per file the person picks the
+audio and subtitle track, then *Open the selected* (back to the normal window) or *Convert the selected / all* (pre-fills the
+batch converter, each job `(file, audio_idx, sub_idx)`; `BatchWorker` deep-copies the settings per job). Unprotected rips only
+- nothing here touches AACS/CSS.
+- `video.list_tracks` -> `Track` (disc-style names: Dolby TrueHD / Digital Plus, DTS-HD MA, PGS "Blu-ray picture", ...);
+  `best_audio_index` skips commentaries and prefers the marked default. FFmpeg reads ASS subtitles back as codec `ssa`.
+- Picture subtitles (PGS / VobSub) can only be copied into an MKV, never converted. Subtitles are kept only in MKV; choosing one
+  switches `ExportSettings.container` to `mkv` (MP4 formats only; ProRes etc. are unchanged).
+- Audio MP4/MOV cannot hold (TrueHD, DTS, DTS-HD: not in `video.MP4_AUDIO`) is re-encoded to AAC there and copied untouched in
+  an MKV; the panel says so. In/Out ranges re-time the subtitle packets. `src.seek(0)` before the second demux pass.
+- The preview plays the chosen audio track (`PreviewPlayer.set_audio_track`, by position in file order).
+- Tests build real MKVs with PyAV (`tests/test_tracks.py::make_rip`: ac3 5.1 eng, aac fre, commentary, two ASS tracks).
+
 ## Depth zones (0.2): showing where things will sit relative to the screen
 
 `zones.py` turns `stereo.disparity_map` (signed pixels, positive = in front of the screen) into percent of the
@@ -327,6 +343,24 @@ how `scripts/blender/bake_room.py` handles it now:
   The output dir is made absolute (a relative one was resolved from the .blend's folder and the export could not find the images).
 - A bake stops at once if a visible mesh is in no group or a listed name is missing (`--allow-unbaked` overrides); `ProjectorLensGlow` is hidden in
   every bake (the app will draw the beam and lens glow live).
+**Getting into VR without the mouse, and sound (2026-10-03).** `VRController.watch(True)` (switched on by `MainWindow._update_vr_watch`
+while the Library tab is open and `settings.vr_auto_connect`) polls `vr.headset_present()` (an OpenXR instance + one system query, off
+the UI thread, every 5 s) and starts the session by itself when a headset appears; a session that finds none while watching is silent
+(not the "Please connect your headset" box). Leaving VR from the menu (`stop()`) pauses watching until VR is asked for again. The
+Library's Play in VR button is enabled with nothing selected (`vr_requested(None)`: the app starts the session and the headset's first
+wear opens the Videos page). Sound: `apply_audio()` routes the film to the output device whose name matches `AUDIO_HINTS` ("Oculus
+Virtual Audio Device" for Meta Link), at session creation, on every wear and when a film is shown, so the person never has to visit
+Windows' sound settings; the menu's Sound row (`("audio", +-1)`) cycles Automatic and each device, and the choice is saved in
+`settings.vr_audio_device`. The Meta runtime's own answer (XR_OCULUS_audio_device_guid) is not used; name matching was enough.
+**Glow (2026-10-03).** Every `BiasGlow*` mesh is exported and drawn (`room.glows`): the shader measures the 3D distance from each
+fragment to the screen rectangle (past the edges, plus how far in front of the screen's plane) and tints with the nearest picture
+edge, so one formula serves the wall behind the screen, the floor, the top and the sides (`GLOW_REACH`, `GLOW_GAIN` per surface kind,
+`GLOW_STRENGTH` in renderer.py). Ceiling clutter is not followed: a plane only lights what it covers.
+**Third bake (home_theatre_v3).** Island gaps are 28 px (`ISLAND_GAP` x `MARGIN_PX`) with a 20 px bake margin so no black is left to bleed
+into the edges of the ceiling panels (the first two bakes packed islands 6 px apart and left the rest black; mipmapping blended it in);
+the flat ceiling is its own 2048 group; the nine chairs are split per row (`split_chairs`, three 4096 atlases at ~620 px/m with 10 px
+gaps, was one at 288); `Wood2` (the gold lattice, driven by a Metallic map) is baked as diffuse because shine cannot be baked.
+GPU memory of the room is now ~1.6 GB (lit+dim+screen, mipmapped); the old one was ~0.7 GB.
 **Pointer rays are drawn last, on top, without depth test** (`renderer.draw_eye`, 5-element tuples (origin, direction, length,
 colour, landed) with a dot at the tip when `landed`). Depth-tested they were hidden piecemeal by chair backs and the console and
 looked "cut in half and shifted" in the headset; the menu panel also showed them ghosting through it. Reproduce without a

@@ -527,3 +527,24 @@ def test_where_screenshots_go(tmp_path, monkeypatch):
     (tmp_path / "Pictures" / "Ultimate Video to 3D Studio").rmdir()
     (tmp_path / "Pictures").rmdir()
     assert paths.screenshots_dir() == tmp_path / "data" / "screenshots"                  # no Pictures folder: beside the app's data
+
+
+def test_the_sound_row_shows_where_the_sound_goes_and_steps_through_devices(qapp):
+    menu = ready()
+    menu.image()
+    assert not any(b.id.startswith("audio:") for b in menu._buttons)           # no row until the controller says where the sound goes
+    menu.set_audio("Automatic: Headphones (Oculus Virtual Audio Device)")
+    assert click(menu, "audio:1") == ("audio", 1)
+    assert click(menu, "audio:-1") == ("audio", -1)
+
+
+def test_every_main_page_row_fits_with_the_sound_row_and_a_note(qapp):
+    menu = ready()
+    menu.set_audio("Automatic: Headphones (Oculus Virtual Audio Device)")
+    menu.set_note("Screenshot saved in your Pictures folder.")
+    menu.image()
+    rects = [(b.id, b.rect) for b in menu._buttons]
+    for i, (a_id, a) in enumerate(rects):
+        assert 0 <= a.left() and a.right() <= menumod.W and 0 <= a.top() and a.bottom() <= menumod.H, a_id
+        for b_id, b in rects[i + 1:]:
+            assert not a.intersects(b), (a_id, b_id)

@@ -46,6 +46,13 @@ class ExportSettings:
     quality: int = 60
     profile: int = 0                # index into the family's profiles
     audio: str = "copy"             # "copy" | "aac" | "none"
+    #: Which audio track of the source (its stream index; -1 = the best one, see video.best_audio_index) and which subtitle track
+    #: (-1 = none). Both belong to the file that is open, so opening another file sets them back.
+    audio_track: int = -1
+    subtitle_track: int = -1
+    #: "auto" = the format's own file type; "mkv" = Matroska for the MP4 formats (H.264, H.265, AV1): it keeps subtitles and
+    #: any audio the source has (TrueHD, DTS-HD...) that MP4 would turn into AAC.
+    container: str = "auto"
     #: Per-eye height cap. 0 keeps the source size.
     max_height: int = 0
     #: "keep" preserves HDR when the codec can carry it; "tonemap" writes SDR.
@@ -75,6 +82,8 @@ class AppSettings:
     last_video_dir: str = ""
     last_lut_dir: str = ""
     vr_room_dir: str = ""                # a baked VR room folder; "" = the first one found, or the plain stand-in room
+    vr_auto_connect: bool = True         # on the Library tab, look for a headset and get ready for it by itself
+    vr_audio_device: str = ""            # the sound device chosen in the headset's menu; "" = the headset's own, automatically
     #: The first-launch encoder probe (see encoders.ProbeReport), or {} if not run.
     encoder_probe: dict = field(default_factory=dict)
     #: 0 for a fresh install; the version of the tour last seen.
@@ -111,7 +120,7 @@ class AppSettings:
             colour=ColourSettings.from_dict(raw.get("colour")),
             export=build(ExportSettings, raw.get("export")),
         )
-        for name in ("theme", "density", "preview_mode", "last_video_dir", "last_lut_dir", "vr_room_dir"):
+        for name in ("theme", "density", "preview_mode", "last_video_dir", "last_lut_dir", "vr_room_dir", "vr_audio_device"):
             if isinstance(raw.get(name), str):
                 setattr(settings, name, raw[name])
         if isinstance(raw.get("encoder_probe"), dict):
@@ -127,6 +136,8 @@ class AppSettings:
             settings.preview_fps = raw["preview_fps"]
         if isinstance(raw.get("check_updates"), bool):
             settings.check_updates = raw["check_updates"]
+        if isinstance(raw.get("vr_auto_connect"), bool):
+            settings.vr_auto_connect = raw["vr_auto_connect"]
         settings.force_cpu_depth = bool(raw.get("force_cpu_depth", False))
         return settings
 

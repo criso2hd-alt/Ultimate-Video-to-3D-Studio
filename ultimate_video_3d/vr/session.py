@@ -208,8 +208,7 @@ def _prefer_srgb_swapchain() -> None:
     OpenGLGraphics.select_color_swapchain_format = staticmethod(select)
 
 
-NO_HEADSET = ("No VR headset was found. Please connect your headset (on a Quest: start Link or Air Link and "
-              "wake the headset), then try again.")
+from . import NO_HEADSET  # noqa: E402  (shared with the controller, which must not import this OpenGL module)
 
 
 def friendly_error(error: BaseException) -> str:
@@ -514,6 +513,10 @@ class VRSession(QObject):
             self._welcomed = True
             self._place_panel()
             self.menu.show("videos" if self.menu.tiles and not self.media.is_open else "help", auto_close=True)
+
+    def set_audio_label(self, label: str | None) -> None:
+        """Where the film's sound goes, shown on the menu's Sound row (None hides the row)."""
+        self.menu.set_audio(label)
 
     def set_videos(self, tiles: list) -> None:
         """The Library, as shown on the menu's Videos page (any thread; replaced as a whole)."""

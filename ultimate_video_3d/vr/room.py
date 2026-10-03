@@ -72,6 +72,14 @@ class GlowQuad:
     positions: np.ndarray                    # (4, 3) world
     indices: np.ndarray
 
+    @property
+    def normal(self) -> np.ndarray:
+        """Which way the surface faces (unit length), from its first triangle."""
+        p = self.positions[self.indices[:3]].astype(np.float64)
+        n = np.cross(p[1] - p[0], p[2] - p[0])
+        length = np.linalg.norm(n)
+        return n / length if length else np.array([0.0, 0.0, 1.0])
+
 
 @dataclass
 class Room:
@@ -81,7 +89,8 @@ class Room:
     seats: list[Seat] = field(default_factory=list)
     spawn: Seat | None = None
     screen: ScreenQuad | None = None
-    glow: GlowQuad | None = None
+    glow: GlowQuad | None = None             # the plane on the screen wall (named exactly BiasGlow)
+    glows: list[GlowQuad] = field(default_factory=list)      # every BiasGlow* plane: that one, plus floor, top and sides if the owner made them
     default_seat: str = ""
     light_level_paused: float = 0.6
     screen_emission: float = 8.0
@@ -162,9 +171,12 @@ def load(folder: str | Path) -> Room:
         if node.name == "Screen":
             room.screen = _screen_of(node, mesh)
             continue
-        if node.name == "BiasGlow":
+        if node.name.startswith("BiasGlow"):
             prim = mesh.primitives[0]
-            room.glow = GlowQuad(_world_points(node, prim.positions), prim.indices)
+            quad = GlowQuad(_world_points(node, prim.positions), prim.indices)
+            room.glows.append(quad)
+            if node.name == "BiasGlow" or room.glow is None:
+                room.glow = quad
             continue
         for prim in mesh.primitives:
             if prim.material is None or prim.uv is None:

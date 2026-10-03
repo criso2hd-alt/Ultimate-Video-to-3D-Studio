@@ -255,6 +255,8 @@ class PreviewPlayer(QObject):
         self._output = QAudioOutput(self)
         self._audio.setAudioOutput(self._output)          # no video sink: this plays sound only
         self._audio.setLoops(QMediaPlayer.Loops.Infinite)
+        self._wanted_track = -1                      # which audio track (0-based, in file order) the person chose to hear
+        self._audio.tracksChanged.connect(self._apply_audio_track)
         self._audio.positionChanged.connect(self._audio_position)
         self._audio_command.connect(self._on_audio_command)
         self._clock = Clock()
@@ -386,6 +388,7 @@ class PreviewPlayer(QObject):
     def open(self, path: Path, info: video.VideoInfo) -> None:
         self.close()
         self._path, self._info, self._has_audio = path, info, info.has_audio
+        self._wanted_track = -1
         self._playing = self._mode_buffered = False
         self._too_slow = False
         self._clock.stop()
@@ -400,6 +403,16 @@ class PreviewPlayer(QObject):
         feeder.seek(0.0, True)                         # show the first frame; stay paused
         self.state_changed.emit(False)
         self._prefill()                                # a 3D view already chosen starts preparing at once
+
+    def set_audio_track(self, ordinal: int) -> None:
+        """Hear the n-th audio track of the open file (0-based, in the order they are stored); -1 = the file's default."""
+        self._wanted_track = int(ordinal)
+        self._apply_audio_track()
+
+    def _apply_audio_track(self) -> None:
+        tracks = self._audio.audioTracks()
+        if 0 <= self._wanted_track < len(tracks) and self._audio.activeAudioTrack() != self._wanted_track:
+            self._audio.setActiveAudioTrack(self._wanted_track)
 
     def close(self) -> None:
         self._buffered.halt()

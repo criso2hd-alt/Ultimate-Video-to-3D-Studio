@@ -178,24 +178,32 @@ void main() {
 
 _GLOW_FS = "#version 330 core\n" + _COMMON + """
 in vec3 v_world;
-uniform vec2 u_centre;                          // the screen's centre and half size, in the wall's x / y
+uniform vec3 u_centre;                          // the screen: its centre, its right / up / forward axes (unit) and half size
+uniform vec3 u_right;
+uniform vec3 u_up;
+uniform vec3 u_forward;
 uniform vec2 u_half;
 uniform vec3 u_top;                             // the picture's edge colours (display-encoded)
 uniform vec3 u_bottom;
 uniform vec3 u_left;
-uniform vec3 u_right;
-uniform float u_strength;
+uniform vec3 u_right_colour;
+uniform float u_strength;                       // overall, and for this plane (floor and side planes are weaker)
+uniform vec3 u_reach;                           // falloff per metre, and where the fade-out starts and ends (metres)
 out vec4 colour;
 void main() {
-    vec2 d = v_world.xy - u_centre;
-    float wt = max(d.y - u_half.y, 0.0), wb = max(-d.y - u_half.y, 0.0);
-    float wl = max(-d.x - u_half.x, 0.0), wr = max(d.x - u_half.x, 0.0);
-    float outside = length(vec2(max(abs(d.x) - u_half.x, 0.0), max(abs(d.y) - u_half.y, 0.0)));
-    vec3 near = (to_linear(u_top) * wt + to_linear(u_bottom) * wb + to_linear(u_left) * wl + to_linear(u_right) * wr)
-                / max(wt + wb + wl + wr, 1e-4);
-    // a halo that is gone before the quad's own edge, so no rectangle shows. The owner's glow plane now reaches almost to the
-    // wall edges (0.8-1.3 m beyond the screen), so the fade is long and soft: gone by 0.85 m (it was a tight 0.22-0.48 m)
-    float glow = exp(-outside * 2.4) * smoothstep(0.0, 0.05, outside) * (1.0 - smoothstep(0.40, 0.85, outside));
+    // How far this point is from the screen, in 3D: sideways and up/down past the picture's edges, plus how far it sits in
+    // front of the screen's plane. The same formula lights the wall behind the screen, the floor, the side walls and the top.
+    vec3 d = v_world - u_centre;
+    float x = dot(d, u_right), y = dot(d, u_up), z = max(dot(d, u_forward), 0.0);
+    float ox = max(abs(x) - u_half.x, 0.0), oy = max(abs(y) - u_half.y, 0.0);
+    float dist = length(vec3(ox, oy, z));
+    float wt = max(y - u_half.y, 0.0), wb = max(-y - u_half.y, 0.0), wl = max(-x - u_half.x, 0.0), wr = max(x - u_half.x, 0.0);
+    float total = wt + wb + wl + wr;
+    vec3 mean = (to_linear(u_top) + to_linear(u_bottom) + to_linear(u_left) + to_linear(u_right_colour)) * 0.25;
+    vec3 near = total > 1e-4 ? (to_linear(u_top) * wt + to_linear(u_bottom) * wb + to_linear(u_left) * wl
+                                + to_linear(u_right_colour) * wr) / total : mean;
+    // a soft halo that has faded out well before the plane's own edge, so no rectangle shows
+    float glow = exp(-dist * u_reach.x) * smoothstep(0.0, 0.05, dist) * (1.0 - smoothstep(u_reach.y, u_reach.z, dist));
     colour = vec4(to_display(near * glow * u_strength), 1.0);               // added to what is already there
 }
 """
@@ -223,6 +231,13 @@ void main() {
     colour = vec4(c.rgb, c.a * u_alpha);
 }
 """
+
+
+#: The halo around the screen. Falloff per metre, and the distance (metres from the picture's edge) where the fade-out starts and ends.
+GLOW_REACH = (1.5, 0.7, 1.9)
+GLOW_STRENGTH = 0.8
+#: How strongly each kind of surface takes the glow: the wall behind the screen fully, the floor/top/sides less ("fade heavily").
+GLOW_GAIN = {"wall": 1.0, "floor": 0.55, "top": 0.65, "side": 0.5}
 
 
 def _compile(vertex: str, fragment: str) -> int:
@@ -409,13 +424,20 @@ class Renderer:
                 "scale": 2.0 ** -group.screen_ev / max(self.room.screen_emission, 1e-6),
                 "has_screen": group.screen is not None,
             })
-        glow = None
-        if self.room.glow is not None:
-            quad = self.room.glow
-            glow = {"vao": self._indexed_vao(np.ascontiguousarray(quad.positions, np.float32),
-                                              quad.indices.astype(np.uint32), [(0, 3, 0)], 12),
-                    "count": len(quad.indices)}
-        self._room_gl = {"groups": groups, "glow": glow}
+        glows = []
+        screen_normal = self.room.screen.normal if self.room.screen is not None else np.array([0.0, 0.0, 1.0])
+        for quad in self.room.glows:
+            n = quad.normal
+            if abs(float(n @ screen_normal)) > 0.7:
+                gain = GLOW_GAIN["wall"]
+            elif abs(float(n[1])) > 0.7:                         # a floor or a ceiling
+                gain = GLOW_GAIN["floor"] if n[1] > 0 else GLOW_GAIN["top"]
+            else:
+                gain = GLOW_GAIN["side"]
+            glows.append({"vao": self._indexed_vao(np.ascontiguousarray(quad.positions, np.float32),
+                                                   quad.indices.astype(np.uint32), [(0, 3, 0)], 12),
+                          "count": len(quad.indices), "gain": gain})
+        self._room_gl = {"groups": groups, "glows": glows}
 
     def _draw_baked_room(self, vp: np.ndarray, now: float) -> None:
         if self._room_gl is None:
@@ -439,23 +461,30 @@ class Renderer:
             GL.glBindVertexArray(group["vao"])
             GL.glDrawElements(GL.GL_TRIANGLES, group["count"], GL.GL_UNSIGNED_INT, None)
         GL.glActiveTexture(GL.GL_TEXTURE0)
-        glow = self._room_gl["glow"]
-        if glow is not None and self.has_picture and self.room.screen is not None:
+        glows = self._room_gl["glows"]
+        if glows and self.has_picture and self.room.screen is not None:
             program = self._glow_program
             GL.glUseProgram(program)
             self._m4(program, "u_vp", vp)
             screen = self.room.screen
-            GL.glUniform2f(GL.glGetUniformLocation(program, "u_centre"), float(screen.centre[0]), float(screen.centre[1]))
+            m = np.asarray(screen.matrix, np.float64)
+            axes = {name: m[:3, i] / (np.linalg.norm(m[:3, i]) or 1.0) for name, i in (("u_right", 0), ("u_up", 1), ("u_forward", 2))}
+            GL.glUniform3f(GL.glGetUniformLocation(program, "u_centre"), *map(float, screen.centre))
+            for name, axis in axes.items():
+                GL.glUniform3f(GL.glGetUniformLocation(program, name), *map(float, axis))
             GL.glUniform2f(GL.glGetUniformLocation(program, "u_half"), screen.width / 2, screen.height / 2)
-            for name, colour in zip(("u_top", "u_bottom", "u_left", "u_right"), self.edge_colours):
+            for name, colour in zip(("u_top", "u_bottom", "u_left", "u_right_colour"), self.edge_colours):
                 GL.glUniform3f(GL.glGetUniformLocation(program, name), *map(float, colour))
-            GL.glUniform1f(GL.glGetUniformLocation(program, "u_strength"), 0.8 * (1.0 - 0.8 * float(self.room_light)))
+            GL.glUniform3f(GL.glGetUniformLocation(program, "u_reach"), *GLOW_REACH)
             GL.glUniform1f(GL.glGetUniformLocation(program, "u_time"), now)
+            base = GLOW_STRENGTH * (1.0 - 0.8 * float(self.room_light))
             GL.glEnable(GL.GL_BLEND)
             GL.glBlendFunc(GL.GL_ONE, GL.GL_ONE)
             GL.glDepthMask(GL.GL_FALSE)
-            GL.glBindVertexArray(glow["vao"])
-            GL.glDrawElements(GL.GL_TRIANGLES, glow["count"], GL.GL_UNSIGNED_INT, None)
+            for glow in glows:
+                GL.glUniform1f(GL.glGetUniformLocation(program, "u_strength"), base * glow["gain"])
+                GL.glBindVertexArray(glow["vao"])
+                GL.glDrawElements(GL.GL_TRIANGLES, glow["count"], GL.GL_UNSIGNED_INT, None)
             GL.glDepthMask(GL.GL_TRUE)
             GL.glDisable(GL.GL_BLEND)
 

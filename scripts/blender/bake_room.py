@@ -40,20 +40,33 @@ GROUPS: dict[str, dict] = {
     "wall_left": {"objects": ["Wall_Right_Left"], "size": 4096},       # the side walls + stone; renamed from Wall_Left in the owner's file
     "walls_plaster": {"objects": ["Wall_Back", "Wall_Front", "Door2"], "size": 4096},
     "floor_carpet": {"objects": ["Floor"], "size": 4096},
+    # The flat ceiling is mostly hidden behind the panels but took half of their atlas; on its own it needs far less.
+    "ceiling_plane": {"objects": ["Ceiling"], "size": 2048},
     # Cylinder: the black rods that hold the panels up. Projector + Projector_Mount: the ceiling-hung projector (the
     # Projector_Lens empty, where the beam starts, is not geometry and is not baked)
-    "ceiling_panels": {"objects": ["Ceiling", "AcusticPanels", "Cylinder", "Projector", "Projector_Mount"], "size": 4096},
-    "chairs_details": {"objects": ["Home Theater Armchair N220224.008", "Text.001", "icon_transparent"], "size": 4096},
+    "ceiling_panels": {"objects": ["AcusticPanels", "Cylinder", "Projector", "Projector_Mount"], "size": 4096},
+    # The nine armchairs share one imported object; ``split_chairs`` cuts it into one object per ROW so that each row has a
+    # 4096 atlas of its own (one atlas for all nine seats left the leather and wood grain too coarse to see).
+    "chairs_row1": {"objects": ["Chairs_Row1"], "size": 4096, "gap_px": 10},
+    "chairs_row2": {"objects": ["Chairs_Row2"], "size": 4096, "gap_px": 10},
+    "chairs_row3": {"objects": ["Chairs_Row3"], "size": 4096, "gap_px": 10},
+    "chairs_details": {"objects": ["Text.001", "icon_transparent"], "size": 2048},          # the lit lettering and the logo card
     # The hallway seen through the doors: its floor and the long wood wall at the end. It was 84 px per metre (a 2048 atlas
     # for a 24 m strip) against ~340 in the room; a 6144 atlas of just these two objects brings it level with the room.
     "hall": {"objects": ["Floor.001", "Wall_Back.002"], "size": 6144},
 }
+CHAIR_OBJECT = "Home Theater Armchair N220224.008"
+#: Materials whose shine comes from a Metallic map. A bake cannot store shine (it depends on where you look from), so metal bakes
+#: dark: the gold lattice on the wall-base framing went black next to the floor lights, where Blender's own render sparkles.
+#: For the bake only they are treated as diffuse, so the gold still takes the light.
+DEMETAL_FOR_BAKE = ("Wood2",)
 EXPORT_SKIP = ("icon_transparent",)          # baked, then composited onto the wall (composite_logo.py); not exported as geometry
 NOT_BAKED_HIDDEN = ("BiasGlow",)            # drawn live by the app: must not paint the wall behind the screen
 GLOW_PREFIX = "BiasGlow"                    # ...and so is every object whose name starts with it (BiasGlow.001, BiasGlow_Floor...)
 LIGHT_COLLECTIONS = ("03_LIGHTS_LIT", "04_LIGHTS_DIM")
 SCREEN_STRENGTH = 8.0                       # the Screen's emission for the screen-only bake (matches its bake3_strength)
-MARGIN_PX = 16
+MARGIN_PX = 20                              # the bake extends each island's edge colour this far...
+ISLAND_GAP = 1.4                            # ...and islands are packed this many margins apart, so no black gap is left to bleed in
 
 
 #: Meshes that are deliberately not baked: the glow planes and the screen are drawn live, the reference figure is hidden, and
@@ -76,6 +89,82 @@ def uncovered_meshes() -> list[str]:
 def missing_objects() -> list[str]:
     """Names listed in GROUPS that the file does not have (an object renamed or deleted since the groups were written)."""
     return sorted({name for spec in GROUPS.values() for name in spec["objects"] if name not in bpy.data.objects})
+
+
+def split_chairs() -> None:
+    """Cut the one imported armchair object into one object per row (Chairs_Row1..3), each connected piece going to the row whose
+    seat it is nearest. Done identically in every run, so the saved UV layouts keep matching. Nothing is saved to the .blend."""
+    import bmesh
+
+    src = bpy.data.objects.get(CHAIR_OBJECT)
+    if src is None:
+        return
+    rows = []
+    for k in (1, 2, 3):
+        seat = bpy.data.objects.get(f"Seat_R{k}_Centre")
+        if seat is None:
+            log(f"split_chairs: no Seat_R{k}_Centre; the chairs stay in one object")
+            return
+        rows.append(seat.matrix_world.translation.y)
+    make_visible([src])
+    deselect_all()
+    src.select_set(True)
+    bpy.context.view_layer.objects.active = src
+    bpy.ops.object.transform_apply(location=True, rotation=True, scale=True)      # the mesh is then in world units
+    bm = bmesh.new()
+    bm.from_mesh(src.data)
+    bm.faces.ensure_lookup_table()
+    row_of = {}
+    seen = set()
+    for face in bm.faces:
+        if face.index in seen:
+            continue
+        stack, piece = [face], []
+        seen.add(face.index)
+        while stack:
+            f = stack.pop()
+            piece.append(f)
+            for e in f.edges:
+                for g in e.link_faces:
+                    if g.index not in seen:
+                        seen.add(g.index)
+                        stack.append(g)
+        y = sum(f.calc_center_median().y for f in piece) / len(piece)
+        row = min(range(3), key=lambda i: abs(rows[i] - y))
+        for f in piece:
+            row_of[f.index] = row
+    for row in range(3):
+        part = bm.copy()
+        part.faces.ensure_lookup_table()
+        drop = [f for f in part.faces if row_of[f.index] != row]
+        bmesh.ops.delete(part, geom=drop, context="FACES")
+        strays = [v for v in part.verts if not v.link_faces]
+        bmesh.ops.delete(part, geom=strays, context="VERTS")
+        mesh = bpy.data.meshes.new(f"Chairs_Row{row + 1}")
+        part.to_mesh(mesh)
+        part.free()
+        for material in src.data.materials:
+            mesh.materials.append(material)
+        obj = bpy.data.objects.new(f"Chairs_Row{row + 1}", mesh)
+        for collection in src.users_collection:
+            collection.objects.link(obj)
+        log(f"split_chairs: Chairs_Row{row + 1} has {len(mesh.polygons)} faces")
+    bm.free()
+    bpy.data.objects.remove(src, do_unlink=True)
+
+
+def demetal_for_bake() -> None:
+    for name in DEMETAL_FOR_BAKE:
+        mat = bpy.data.materials.get(name)
+        if mat is None or not mat.node_tree:
+            continue
+        for node in mat.node_tree.nodes:
+            if node.bl_idname == "ShaderNodeBsdfPrincipled":
+                for link in list(mat.node_tree.links):
+                    if link.to_node == node and link.to_socket.name == "Metallic":
+                        mat.node_tree.links.remove(link)
+                node.inputs["Metallic"].default_value = 0.0
+                log(f"{name}: metallic map ignored for the bake (shine cannot be baked; the gold takes the light instead)")
 
 
 def deselect_all() -> None:
@@ -109,7 +198,8 @@ def parse(argv: list[str]) -> dict:
     i = 1
     while i < len(argv):
         key = argv[i]
-        if key == "--allow-unbaked":                  # a flag, not a pair
+        if key in ("--allow-unbaked", "--layout-only"):              # flags, not pairs
+            out[key.lstrip("-").replace("-", "_")] = True
             i += 1
             continue
         if key == "--samples":
@@ -371,7 +461,7 @@ def write_logo_info(out: Path, report: dict) -> None:
     log("wrote logo_info.json")
 
 
-def unwrap(objs) -> None:
+def unwrap(objs, size: int, gap_px: float | None = None) -> None:
     """A fresh UV layout for the whole group: one shared atlas, equal pixels per metre on every surface."""
     deselect_all()
     for obj in objs:
@@ -388,15 +478,18 @@ def unwrap(objs) -> None:
     bpy.ops.mesh.select_all(action="SELECT")
     # correct_aspect=False: by default it uses the aspect of the material's texture image, which in a background run
     # (external textures not loaded: size 0 x 0) turned a 9.5 x 5.2 m wall into a 14:1 sliver and wasted 80% of the atlas.
-    bpy.ops.uv.smart_project(angle_limit=math.radians(66), island_margin=0.0015, scale_to_bounds=False,
+    # a group may ask for tighter packing (thousands of tiny pieces that are only ever seen up close); every gap must stay under
+    # twice the bake margin so the margins fill it and no black is left to bleed in
+    gap = (gap_px if gap_px is not None else ISLAND_GAP * MARGIN_PX) / size
+    bpy.ops.uv.smart_project(angle_limit=math.radians(66), island_margin=gap, scale_to_bounds=False,
                              correct_aspect=False)
     bpy.ops.uv.select_all(action="SELECT")
     # No average_islands_scale here: measured on the carpet floor it left 23% of the atlas used, against 87% without it.
     # smart_project already sizes every island by its real size, and pack_islands scales them all alike to fill the square.
     try:
-        bpy.ops.uv.pack_islands(margin=0.0015, rotate=True, scale=True)
+        bpy.ops.uv.pack_islands(margin=gap, rotate=True, scale=True)
     except TypeError:
-        bpy.ops.uv.pack_islands(margin=0.0015)
+        bpy.ops.uv.pack_islands(margin=gap)
     bpy.ops.object.mode_set(mode="OBJECT")
 
 
@@ -585,9 +678,10 @@ def finish_and_export(groups_done: dict, out: Path) -> None:
             obj.select_set(True)
             bpy.context.view_layer.objects.active = obj
             keep.append(obj)
-    for name in ("Screen", "BiasGlow", "Spawn"):
+    for name in ("Screen", "Spawn"):
         if name in bpy.data.objects:
             keep.append(bpy.data.objects[name])
+    keep += [o for o in bpy.data.objects if o.name.startswith(GLOW_PREFIX) and o.type == "MESH"]      # BiasGlow, BiasGlow.001...
     keep += [o for o in bpy.data.objects if o.name.startswith("Seat_")]
     deselect_all()
     for obj in keep:
@@ -623,6 +717,7 @@ def main() -> None:
     view = (scene.view_settings.view_transform, scene.view_settings.look, scene.view_settings.exposure)
     log("view transform:", view, "| file saved by Blender", bpy.data.version, "| phase", opts["phase"])
     ensure_object_mode()
+    split_chairs()
     problems = []
     if missing_objects():
         problems.append("listed in GROUPS but not in the file (renamed or deleted?): " + ", ".join(missing_objects()))
@@ -654,6 +749,7 @@ def main() -> None:
         return
 
     configure_cycles(opts["samples"])
+    demetal_for_bake()
     for obj in bpy.data.objects:
         if obj.name in NOT_BAKED_HIDDEN or obj.name.startswith(GLOW_PREFIX) or obj.name in HIDDEN_IN_BAKE:
             obj.hide_render = True
@@ -673,7 +769,7 @@ def main() -> None:
             for attempt in range(3):
                 # The very first unwrap after Blender loads a file packs badly (23% of the atlas used, measured; every
                 # later one uses 87%), whatever the settings. A low coverage is therefore simply done again.
-                unwrap(objs)
+                unwrap(objs, size, spec.get("gap_px"))
                 coverage, density = uv_density(objs, size)
                 if coverage >= 0.6:
                     break
@@ -684,7 +780,7 @@ def main() -> None:
             make_logo_opaque()                                     # only for this group: the wall must be baked with the real, see-through logo
         entry = report["groups"].setdefault(group, {"bakes": {}})
         entry.update({"objects": spec["objects"], "size": size, "uv_coverage": round(coverage, 3), "px_per_m": round(density)})
-        for state in opts["states"]:
+        for state in ([] if opts.get("layout_only") else opts["states"]):
             edge = size if state != "screen" else max(256, size // 2)
             entry["bakes"][state] = bake_one(group, objs, state, edge, out, opts["samples"], switches, view)
             (out / "bake_report.json").write_text(json.dumps(report, indent=1, default=str))

@@ -10,7 +10,7 @@ lights, seat, volume, exit), ``videos`` (the Library, three by two thumbnails a 
 Pressing a button returns an *action* tuple for whoever owns the headset to carry out, or None when the press was only
 about the menu itself (changing page, paging through videos):
     ("play",)  ("video", Tile)  ("lights", "auto"|"on"|"off")  ("volume", 0..1)  ("seat", +1|-1)  ("recentre",)
-    ("exit",)  ("close",)  ("screenshot",)
+    ("exit",)  ("close",)  ("screenshot",)  ("audio", +1|-1)
 """
 
 from __future__ import annotations
@@ -67,6 +67,7 @@ class Menu:
         self.tiles: list[Tile] = []
         self.video_page = 0
         self.help_left = 0.0                # seconds until the help card closes itself; 0 = it stays
+        self.audio_label: str | None = None  # where the sound goes, e.g. "Automatic: Headphones (Oculus Virtual Audio Device)"; None: no row
         self.note = ""                      # a line under the main page's buttons ("Screenshot saved...")
         self.note_left = 0.0
         self._buttons: list[_Button] = []
@@ -88,6 +89,10 @@ class Menu:
 
     def toggle(self) -> None:
         self.close() if self.open else self.show("main")
+
+    def set_audio(self, label: str | None) -> None:
+        if label != self.audio_label:
+            self.audio_label, self._dirty = label, True
 
     def set_note(self, text: str, seconds: float = 9.0) -> None:
         self.note, self.note_left, self._dirty = text, seconds, True
@@ -154,6 +159,8 @@ class Menu:
             return ("lights", self.lights)
         if button in ("seat:-1", "seat:1"):
             return ("seat", int(button[5:]))
+        if button in ("audio:-1", "audio:1"):
+            return ("audio", int(button[6:]))
         if button in ("vol:-", "vol:+"):
             self.volume = min(1.0, max(0.0, round(self.volume + (0.1 if button == "vol:+" else -0.1), 2)))
             self._dirty = True
@@ -241,30 +248,36 @@ class Menu:
     def _main_page(self, p: QPainter) -> None:
         self._header(p, "Ultimate Video to 3D Studio",
                      (f"{'Playing' if self.playing else 'Paused'}: {self.title}" if self.has_media else "Nothing is playing yet."))
-        y = 150
-        self._button(p, "play", QRectF(48, y, 380, 120), "Pause" if self.playing else "Play", style="primary", pixels=44)
-        self._button(p, "page:videos", QRectF(450, y, 380, 120), "Videos", pixels=44)
-        self._button(p, "page:help", QRectF(852, y, 380, 120), "Help", pixels=44)
-        y = 310
+        top = 140
+        self._button(p, "play", QRectF(48, top, 380, 100), "Pause" if self.playing else "Play", style="primary", pixels=44)
+        self._button(p, "page:videos", QRectF(450, top, 380, 100), "Videos", pixels=44)
+        self._button(p, "page:help", QRectF(852, top, 380, 100), "Help", pixels=44)
+        y, pitch, height = 262, 88, 72
         if self.has_lights:
-            self._text(p, QRectF(48, y, 200, 80), "Lights", 36, INK, bold=True)
+            self._text(p, QRectF(48, y, 200, height), "Lights", 34, INK, bold=True)
             for i, (mode, label) in enumerate(LIGHT_MODES):
-                self._button(p, f"lights:{mode}", QRectF(260 + i * 200, y, 184, 80), label,
-                             style="selected" if self.lights == mode else "normal", pixels=34)
-            self._text(p, QRectF(880, y, 350, 80), "Auto: down while a film plays.", 22, FAINT)
-            y += 110
+                self._button(p, f"lights:{mode}", QRectF(260 + i * 200, y, 184, height), label,
+                             style="selected" if self.lights == mode else "normal", pixels=32)
+            self._text(p, QRectF(880, y, 350, height), "Auto: down while a film plays.", 22, FAINT)
+            y += pitch
         if self.has_seats:
-            self._text(p, QRectF(48, y, 200, 80), "Seat", 36, INK, bold=True)
-            self._button(p, "seat:-1", QRectF(260, y, 90, 80), "<", pixels=40)
-            self._text(p, QRectF(360, y, 330, 80), self.seat_label, 30, INK, align=Qt.AlignmentFlag.AlignCenter)
-            self._button(p, "seat:1", QRectF(700, y, 90, 80), ">", pixels=40)
-            y += 110
-        self._text(p, QRectF(48, y, 200, 80), "Volume", 36, INK, bold=True)
-        self._button(p, "vol:-", QRectF(260, y, 90, 80), "-", pixels=44)
-        self._text(p, QRectF(360, y, 330, 80), f"{round(self.volume * 100)}%", 34, INK, align=Qt.AlignmentFlag.AlignCenter)
-        self._button(p, "vol:+", QRectF(700, y, 90, 80), "+", pixels=44)
+            self._text(p, QRectF(48, y, 200, height), "Seat", 34, INK, bold=True)
+            self._button(p, "seat:-1", QRectF(260, y, 90, height), "<", pixels=38)
+            self._text(p, QRectF(360, y, 330, height), self.seat_label, 30, INK, align=Qt.AlignmentFlag.AlignCenter)
+            self._button(p, "seat:1", QRectF(700, y, 90, height), ">", pixels=38)
+            y += pitch
+        self._text(p, QRectF(48, y, 200, height), "Volume", 34, INK, bold=True)
+        self._button(p, "vol:-", QRectF(260, y, 90, height), "-", pixels=42)
+        self._text(p, QRectF(360, y, 330, height), f"{round(self.volume * 100)}%", 34, INK, align=Qt.AlignmentFlag.AlignCenter)
+        self._button(p, "vol:+", QRectF(700, y, 90, height), "+", pixels=42)
+        y += pitch
+        if self.audio_label is not None:
+            self._text(p, QRectF(48, y, 200, height), "Sound", 34, INK, bold=True)
+            self._button(p, "audio:-1", QRectF(260, y, 90, height), "<", pixels=38)
+            self._text(p, QRectF(360, y, 730, height), self.audio_label, 26, INK, align=Qt.AlignmentFlag.AlignCenter)
+            self._button(p, "audio:1", QRectF(1100, y, 90, height), ">", pixels=38)
         if self.note:
-            self._text(p, QRectF(48, 616, W - 96, 44), self.note, 24, SIGNAL)
+            self._text(p, QRectF(48, 612, W - 96, 40), self.note, 24, SIGNAL)
         self._button(p, "recentre", QRectF(48, 668, 380, 80), "Reset view", pixels=30)
         self._button(p, "screenshot", QRectF(450, 668, 380, 80), "Screenshot", pixels=30)
         self._button(p, "exit", QRectF(852, 668, 380, 80), "Leave VR", style="danger", pixels=30)

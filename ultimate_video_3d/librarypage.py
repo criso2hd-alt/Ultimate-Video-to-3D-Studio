@@ -386,7 +386,7 @@ class LibraryPage(QWidget):
         for button in (self.folder_button, self.remove_button, self.delete_button):
             button.setEnabled(entry is not None)
         self.delete_button.setEnabled(entry is not None and not entry.missing)
-        self.vr_button.setEnabled(self._vr_available and entry is not None and not entry.missing)
+        self.vr_button.setEnabled(self._vr_available)         # with nothing selected it still goes into VR, to pick a video there
         if entry is not None:
             self.caption.setText(f"{entry.title}  ·  {entry.detail}"
                                  + ("" if entry.kind == lib.CONVERTED else "  ·  added by you"))
@@ -534,9 +534,10 @@ class LibraryPage(QWidget):
 
     def _play_in_vr(self) -> None:
         entry = self.selected_entry()
-        if entry is not None and not entry.missing:
-            self.player.pause()                           # the picture moves to the headset
-            self.vr_requested.emit(entry)
+        if entry is not None and entry.missing:
+            entry = None
+        self.player.pause()                               # the picture moves to the headset
+        self.vr_requested.emit(entry)                     # None: just go in, and choose the video in the headset
 
     def _space(self) -> None:
         if self.space_hook is not None and self.space_hook():

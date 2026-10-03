@@ -23,6 +23,7 @@ from PySide6.QtWidgets import (
     QHBoxLayout,
     QLabel,
     QListWidget,
+    QListWidgetItem,
     QMainWindow,
     QMessageBox,
     QProgressBar,
@@ -41,6 +42,7 @@ from .discdialog import DiscDialog
 from . import library as librarymod
 from . import zones as zonesmod
 from . import resume as resumemod
+from .folderdialog import FolderDialog
 from .librarypage import LibraryPage
 from .vr.controller import VRController
 from . import APP_TITLE, __version__, bootstrap, cloud, models, onboarding, support, updates, depth as depthmod, encoders, paths, pipeline, stereo, sysinfo, video, warmup
@@ -257,7 +259,8 @@ class BatchWorker(QObject):
     failed = Signal(object, str)
     finished = Signal()
 
-    def __init__(self, jobs: list[tuple[Path, Path]], settings: AppSettings, gpus: list, skip_existing: bool) -> None:
+    def __init__(self, jobs: list[tuple], settings: AppSettings, gpus: list, skip_existing: bool) -> None:
+        # a job is (source, output) or (source, output, audio stream index, subtitle stream index)
         super().__init__()
         self._jobs, self._settings, self._gpus, self._skip = jobs, settings, gpus, skip_existing
         self._stop = False
@@ -267,7 +270,10 @@ class BatchWorker(QObject):
 
     def run(self) -> None:
         total = len(self._jobs)
-        for index, (source, output) in enumerate(self._jobs):
+        for index, job in enumerate(self._jobs):
+            source, output = job[0], job[1]
+            settings = copy.deepcopy(self._settings)                 # each file has its own track choice
+            settings.export.audio_track, settings.export.subtitle_track = (job[2], job[3]) if len(job) > 3 else (-1, -1)
             if self._stop:
                 break
             if self._skip and output.exists():
@@ -276,7 +282,7 @@ class BatchWorker(QObject):
             self.started.emit(index, total, source)
             try:
                 for update in pipeline.convert_video(
-                    source, output, self._settings, 0, None, self.progress.emit,
+                    source, output, settings, 0, None, self.progress.emit,
                     lambda: self._stop, self._gpus,
                 ):
                     if update.stage == "stopped":
@@ -357,7 +363,21 @@ class BatchDialog(QDialog):
         exts = " ".join(f"*{s}" for s in sorted(video.INPUT_SUFFIXES))
         files, _ = QFileDialog.getOpenFileNames(self, "Add videos", self._settings.last_video_dir, f"Video ({exts})")
         for f in files:
-            self.list.addItem(f)
+            self.add_job(Path(f), -1, -1)
+
+    def add_job(self, path: Path, audio_index: int = -1, subtitle_index: int = -1) -> None:
+        """Queue a video; the two numbers are the audio / subtitle stream to keep (-1: the best audio, no subtitles)."""
+        item = QListWidgetItem(str(path))
+        item.setData(Qt.ItemDataRole.UserRole, (audio_index, subtitle_index))
+        try:
+            audio, subtitles = video.list_tracks(path)
+            wanted = audio_index if audio_index >= 0 else video.best_audio_index(audio)
+            sound = next((t.label() for t in audio if t.index == wanted), "no audio")
+            subs = next((t.label() for t in subtitles if t.index == subtitle_index), "none")
+            item.setToolTip(f"Audio: {sound}\nSubtitles: {subs}")
+        except Exception:  # noqa: BLE001 - the tooltip is a courtesy
+            pass
+        self.list.addItem(item)
 
     def _remove(self) -> None:
         for item in self.list.selectedItems():
@@ -374,10 +394,11 @@ class BatchDialog(QDialog):
             self._worker.stop()
             self.status.setText("Stopping after this frame…")
             return
-        sources = [Path(self.list.item(i).text()) for i in range(self.list.count())]
-        if not sources:
+        queue = [(Path(self.list.item(i).text()), *(self.list.item(i).data(Qt.ItemDataRole.UserRole) or (-1, -1)))
+                 for i in range(self.list.count())]
+        if not queue:
             return
-        jobs = [(s, pipeline.output_path_for(s, self._settings, self._out_dir)) for s in sources]
+        jobs = [(s, pipeline.output_path_for(s, self._settings, self._out_dir), a, t) for s, a, t in queue]
         self.bar.setVisible(True)
         self.bar.setRange(0, 0)
         self.start.setText("Stop")
@@ -505,13 +526,19 @@ class VideoPage(QWidget):
         self.pick_disc.setToolTip(
             "Copy a DVD or Blu-ray from your own drive to a video file on this computer, "
             "then turn it into 3D.")
+        # A folder of videos, typically a ripped DVD or Blu-ray: lists every file with its audio and subtitle tracks (folderdialog.py).
+        self.pick_folder = QPushButton("Open a folder of videos…")
+        self.pick_folder.setObjectName("secondary")
+        self.pick_folder.setToolTip(
+            "Open a folder full of videos - for example a ripped disc, one .mkv per title - see each one's sound and "
+            "subtitle tracks, and turn one or all of them into 3D.")
         self.source_label = ElidedLabel("No video chosen")
         self.source_label.setObjectName("hint")
         self.pick_output = QPushButton("Output…")
         self.pick_output.setObjectName("secondary")
         self.output_label = ElidedLabel("Output: choose a video first")
         self.output_label.setObjectName("hint")
-        for w in (self.pick_video, self.pick_disc, self.source_label, self.pick_output, self.output_label):
+        for w in (self.pick_video, self.pick_folder, self.pick_disc, self.source_label, self.pick_output, self.output_label):
             source_card.add(w)
         self.source_card = source_card
 
@@ -682,12 +709,17 @@ class SettingsPage(QWidget):
         self.vr_room_label = QLabel("")
         self.vr_room_label.setObjectName("hint")
         self.vr_room_label.setWordWrap(True)
+        self.vr_auto = QCheckBox("Get ready for my headset when I open the Library")
+        self.vr_auto.setChecked(settings.vr_auto_connect)
+        self.vr_auto.setToolTip("While the Library is open the app looks for a headset every few seconds and connects to it "
+                                "by itself, so you can put the headset on without touching the keyboard or the mouse. "
+                                "Leaving VR from the headset's menu pauses this until you ask for VR again.")
         self.vr_room_button = QPushButton("Choose a VR room folder…")
         self.vr_room_button.setObjectName("secondary")
         self.vr_room_button.setToolTip("A folder with room.glb and room.json (a baked home theatre).")
         self.vr_room_clear = QPushButton("Use the plain room")
         self.vr_room_clear.setObjectName("secondary")
-        for widget in (self.vr_status, self.vr_room_label, self.vr_room_button, self.vr_room_clear):
+        for widget in (self.vr_status, self.vr_auto, self.vr_room_label, self.vr_room_button, self.vr_room_clear):
             vr_card.add(widget)
         cards.append(vr_card)
 
@@ -1101,6 +1133,8 @@ class MainWindow(QMainWindow):
         page = self.video_page
         page.pick_video.clicked.connect(self.pick_video)
         page.pick_disc.clicked.connect(self.pick_disc)
+        page.pick_folder.clicked.connect(self.pick_folder)
+        page.export.audio_track_chosen.connect(self.player.set_audio_track)
         page.pick_output.clicked.connect(self._pick_output)
         page.start.clicked.connect(self._start_convert)
         page.stop.clicked.connect(self._stop_convert)
@@ -1123,6 +1157,9 @@ class MainWindow(QMainWindow):
         sp.update_now.clicked.connect(lambda: self._check_updates(manual=True))
         sp.replay_tutorial.clicked.connect(self.replay_tutorial)
         sp.redetect.clicked.connect(lambda: self._run_probe(force=True))
+        sp.vr_auto.toggled.connect(self._vr_auto_changed)
+        self.vr.audio_choice = self.settings.vr_audio_device
+        self.vr.audio_choice_changed.connect(self._vr_audio_chosen)
         sp.vr_room_button.clicked.connect(self._choose_vr_room)
         sp.vr_room_clear.clicked.connect(self._clear_vr_room)
         self._refresh_vr_settings()
@@ -1270,12 +1307,12 @@ class MainWindow(QMainWindow):
                  self.library_page, lambda: self.tabs.setCurrentWidget(self.library_page)),
             step("Watch in VR",
                  "With a VR headset (Quest via Link or Virtual Desktop, SteamVR, or anything that speaks "
-                 "OpenXR) the Library gets a Play in VR button: the video appears on a big screen in a home "
-                 "theatre and the lights dim by themselves when it plays. Inside, a card shows what every "
-                 "button does, and the menu (left menu button, or B / Y) lets you pick another video, set "
-                 "the lights, change seat, turn the volume and leave. Pressing the right stick resets the "
-                 "view. Choose the room here - without one you get a plain room. The headset is "
-                 "optional; everything else works without it.",
+                 "OpenXR) the Library gets a Play in VR button. While the Library is open the app finds your "
+                 "headset by itself, so you can just put it on: the menu offers your videos, the lights dim "
+                 "when a film plays, and the sound goes to the headset. In the menu (left menu button, or B / Y) "
+                 "you can pick videos, set the lights, change seat (push the right stick toward a seat), "
+                 "choose the sound, take a screenshot and leave; pressing the right stick resets the view. "
+                 "Choose the room here. The headset is optional; everything else works without it.",
                  self.settings_page.vr_card, lambda: self._reveal_setting(self.settings_page.vr_card)),
             step("Settings",
                  "Preview size and smoothness, how far ahead to buffer, appearance, update checks and "
@@ -1561,6 +1598,29 @@ class MainWindow(QMainWindow):
         elif dialog.stream is not None and dialog.sample is not None:
             self._open_disc_stream(dialog.stream, dialog.sample)
 
+    def pick_folder(self) -> None:
+        """Open a folder of videos (a ripped disc): look at every file's tracks, then open one or convert several."""
+        if self._converting:
+            return
+        if not video.is_available():
+            self._download_video_support(then=self.pick_folder)
+            return
+        start = Path(self.settings.last_video_dir) if self.settings.last_video_dir else None
+        dialog = FolderDialog(self, start if start and start.is_dir() else None, self.settings.export.container == "mkv")
+        dialog.setStyleSheet(style_for(self.settings.theme))
+        if not dialog.exec() or dialog.action is None:
+            return
+        export = self.video_page.export
+        if dialog.save_mkv != (self.settings.export.container == "mkv"):
+            export.set_container("mkv" if dialog.save_mkv else "auto")
+        if dialog.action == "open":
+            path, audio_index, subtitle_index = dialog.jobs[0]
+            self._open_path(path)
+            if self.video_page.source == path:
+                export.choose_tracks(audio_index, subtitle_index)
+        else:
+            self.open_batch(jobs=dialog.jobs)
+
     def _open_disc_stream(self, stream, sample: Path) -> None:
         """Direct mode: the picture is a short sample from the film; Convert reads the whole title from the disc."""
         self._open_path(sample)
@@ -1603,6 +1663,11 @@ class MainWindow(QMainWindow):
         page.timeline.set_duration(info.frames or max(1, round(info.duration * info.fps)), info.fps)
         page.timeline.set_range_mode(page.export.range_box.currentData() == "range")
         self._current = None
+        try:
+            audio, subtitles = video.list_tracks(path)
+        except Exception:  # noqa: BLE001 - tracks are a convenience; a file that opens must open
+            audio, subtitles = [], []
+        page.export.set_tracks(audio, subtitles)
         # Opens paused on the first frame: the video only plays when asked to.
         self.player.open(path, info)
         page.show_preview()
@@ -1699,6 +1764,7 @@ class MainWindow(QMainWindow):
         page.start.setEnabled(False)
         page.pick_video.setEnabled(False)
         page.pick_disc.setEnabled(False)
+        page.pick_folder.setEnabled(False)
         page.play_button.setEnabled(False)
         page.stop.setVisible(True)
         page.bar.setVisible(True)
@@ -1776,6 +1842,7 @@ class MainWindow(QMainWindow):
         page.start.setEnabled(page.source is not None)
         page.pick_video.setEnabled(True)
         page.pick_disc.setEnabled(True)
+        page.pick_folder.setEnabled(True)
         page.play_button.setEnabled(page.source is not None)
         page.stop.setVisible(False)
         page.bar.setVisible(False)
@@ -1846,6 +1913,10 @@ class MainWindow(QMainWindow):
             return
         if self.vr.room is None or str(self.vr.room.folder) != str(self._vr_room_dir() or ""):
             self.vr.use_room(self._vr_room_dir())
+        if entry is None:                                    # nothing chosen on the PC: go in and pick from the headset's menu
+            if self.vr.start():
+                self.status.showMessage("Put the headset on and pick a video from the menu.", 12000)
+            return
         self.vr.show(entry.file, entry.layout, preview=False)
 
     def _space_for_vr(self) -> bool:
@@ -1877,8 +1948,24 @@ class MainWindow(QMainWindow):
         except Exception:  # noqa: BLE001 - the Library is a convenience; a finished video is never lost to it
             pass
 
+    def _vr_auto_changed(self, on: bool) -> None:
+        self.settings.vr_auto_connect = on
+        self.settings.save(paths.settings_path())
+        self._update_vr_watch()
+
+    def _vr_audio_chosen(self, choice: str) -> None:
+        self.settings.vr_audio_device = choice            # "" = automatic
+        self.settings.save(paths.settings_path())
+
+    def _update_vr_watch(self) -> None:
+        """Look for a headset while the Library is open (if the person wants that and VR can work here at all)."""
+        on = (self.settings.vr_auto_connect and self.tabs.currentWidget() is self.library_page
+              and self.library_page._vr_available)
+        self.vr.watch(on)
+
     def _tab_changed(self, index: int) -> None:
         self._push_vr_videos()                           # additions and removals are made in the Library tab
+        self._update_vr_watch()
         if self.tabs.widget(index) is not self.library_page:
             self.library_page.pause()                    # leaving the Library stops its video
 
@@ -1911,13 +1998,16 @@ class MainWindow(QMainWindow):
         QMessageBox.warning(self, "Conversion failed", message)
         self.video_page.info_label.setText("Conversion failed")
 
-    def open_batch(self) -> None:
+    def open_batch(self, *_, jobs=None) -> None:
+        """The several-videos converter; ``jobs`` pre-fills it with (file, audio stream index, subtitle stream index)."""
         if not self._guard_support() and self._support_strikes >= 2:
             return
         if not video.is_available():
-            self._download_video_support(then=self.open_batch)
+            self._download_video_support(then=lambda: self.open_batch(jobs=jobs))
             return
         dialog = BatchDialog(self, self.settings, self.gpus, style_for(self.settings.theme))
+        for path, audio_index, subtitle_index in (jobs or []):
+            dialog.add_job(path, audio_index, subtitle_index)
         dialog.converted.connect(lambda source, output: self._record_conversion(output, Path(source).name))
         dialog.exec()
 
@@ -1989,6 +2079,7 @@ class MainWindow(QMainWindow):
             self._thread.wait(15000)
         self.player.shutdown()
         self.library_page.shutdown()
+        self.vr.watch(False)
         self.vr.stop()
         self.engine.shutdown()
         if self._monitor is not None:

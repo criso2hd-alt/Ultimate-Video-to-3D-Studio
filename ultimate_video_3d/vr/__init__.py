@@ -10,6 +10,10 @@ from __future__ import annotations
 import sys
 
 
+NO_HEADSET = ("No VR headset was found. Please connect your headset (on a Quest: start Link or Air Link and "
+              "wake the headset), then try again.")
+
+
 def runtime_path() -> str:
     """The active OpenXR runtime's manifest (Windows registry), or "" if none is installed."""
     if sys.platform != "win32":
@@ -36,6 +40,29 @@ def unavailable_reason() -> str:
         except Exception as error:  # noqa: BLE001 - any import trouble means "not here"
             return f"The VR component '{module}' could not be loaded ({type(error).__name__}: {error})."
     return ""
+
+
+def headset_present() -> bool:
+    """Whether the active OpenXR runtime has a headset behind it right now (for Meta: Link is up and the headset is awake).
+
+    Cheap enough to ask every few seconds: an OpenXR instance, one system query, and the instance is destroyed again. Without a
+    headset the runtime answers "form factor unavailable", which is just False here. Call it from a worker thread, not the window.
+    """
+    if not available():
+        return False
+    try:
+        import xr
+
+        instance = xr.create_instance(xr.InstanceCreateInfo(
+            application_info=xr.ApplicationInfo(application_name="Ultimate Video to 3D Studio", application_version=1,
+                                                engine_name="none", engine_version=0, api_version=xr.XR_CURRENT_API_VERSION)))
+        try:
+            xr.get_system(instance, xr.SystemGetInfo(form_factor=xr.FormFactor.HEAD_MOUNTED_DISPLAY))
+            return True
+        finally:
+            xr.destroy_instance(instance)
+    except Exception:  # noqa: BLE001 - no runtime, no headset, a runtime that is still starting: all "not now"
+        return False
 
 
 def available() -> bool:

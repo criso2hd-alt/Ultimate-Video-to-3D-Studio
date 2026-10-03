@@ -108,6 +108,160 @@ def display_width(width: int, sar) -> int:
     return max(2, round(width * _pixel_aspect(sar) / 2) * 2) if _pixel_aspect(sar) != 1.0 else width
 
 
+# --- audio and subtitle tracks ----------------------------------------------------------------------------------
+
+LANGUAGE_NAMES = {
+    "eng": "English", "fre": "French", "fra": "French", "ger": "German", "deu": "German", "spa": "Spanish", "ita": "Italian",
+    "por": "Portuguese", "rus": "Russian", "jpn": "Japanese", "kor": "Korean", "chi": "Chinese", "zho": "Chinese",
+    "cmn": "Mandarin", "yue": "Cantonese", "dut": "Dutch", "nld": "Dutch", "swe": "Swedish", "nor": "Norwegian",
+    "nob": "Norwegian", "dan": "Danish", "fin": "Finnish", "pol": "Polish", "tur": "Turkish", "ara": "Arabic",
+    "heb": "Hebrew", "hin": "Hindi", "tha": "Thai", "cze": "Czech", "ces": "Czech", "hun": "Hungarian", "gre": "Greek",
+    "ell": "Greek", "rum": "Romanian", "ron": "Romanian", "ukr": "Ukrainian", "vie": "Vietnamese", "ind": "Indonesian",
+    "may": "Malay", "msa": "Malay", "cat": "Catalan", "hrv": "Croatian", "srp": "Serbian", "slo": "Slovak", "slk": "Slovak",
+    "slv": "Slovenian", "bul": "Bulgarian", "ice": "Icelandic", "isl": "Icelandic", "per": "Persian", "fas": "Persian",
+    "tam": "Tamil", "tel": "Telugu", "ben": "Bengali", "fil": "Filipino", "lat": "Latin", "und": "", "zxx": "No speech",
+}
+_AUDIO_FORMATS = {
+    "truehd": "Dolby TrueHD", "mlp": "MLP lossless", "ac3": "Dolby Digital", "eac3": "Dolby Digital Plus", "flac": "FLAC",
+    "aac": "AAC", "mp3": "MP3", "mp2": "MP2", "opus": "Opus", "vorbis": "Vorbis", "alac": "Apple Lossless",
+    "wmav2": "Windows Media Audio", "wmapro": "WMA Pro", "dts": "DTS", "pcm_bluray": "PCM", "pcm_dvd": "PCM",
+}
+_SUBTITLE_FORMATS = {
+    "subrip": "SubRip (text)", "srt": "SubRip (text)", "ass": "Styled text (ASS)", "ssa": "Styled text (ASS)",       # FFmpeg names both "ssa" when it reads them back
+    "hdmv_pgs_subtitle": "Blu-ray picture (PGS)", "dvd_subtitle": "DVD picture", "dvb_subtitle": "DVB picture",
+    "mov_text": "Text (MP4)", "webvtt": "WebVTT (text)", "text": "Text", "hdmv_text_subtitle": "Blu-ray text",
+    "eia_608": "Closed captions", "xsub": "XSUB picture",
+}
+#: Pictures, not text: they cannot be turned into another subtitle format, only carried across in a Matroska (MKV) file.
+PICTURE_SUBTITLES = frozenset({"hdmv_pgs_subtitle", "dvd_subtitle", "dvb_subtitle", "xsub"})
+_DISPOSITION_DEFAULT, _DISPOSITION_COMMENT, _DISPOSITION_FORCED, _DISPOSITION_HEARING = 1, 8, 64, 128
+
+
+def _channel_text(channels: int) -> str:
+    return {1: "mono", 2: "stereo", 3: "2.1", 4: "4.0", 5: "5.0", 6: "5.1", 7: "6.1", 8: "7.1"}.get(channels, f"{channels} ch" if channels else "")
+
+
+@dataclass(frozen=True)
+class Track:
+    """One audio or subtitle track of a file, described for a person to choose between."""
+
+    kind: str                  # "audio" | "subtitle"
+    index: int                 # the stream's index in its container: what the conversion is told to use
+    codec: str                 # FFmpeg's name: "truehd", "dts", "ac3", "subrip", "hdmv_pgs_subtitle"...
+    language: str = ""         # ISO 639-2 code as stored ("eng"), "" when not tagged
+    title: str = ""
+    channels: int = 0
+    sample_rate: int = 0
+    bit_rate: int = 0
+    profile: str = ""          # e.g. "DTS-HD MA"
+    default: bool = False
+    forced: bool = False
+    commentary: bool = False
+    hearing_impaired: bool = False
+
+    @property
+    def language_name(self) -> str:
+        code = self.language.lower()
+        return LANGUAGE_NAMES.get(code, code.upper()) if code else ""
+
+    @property
+    def format_name(self) -> str:
+        if self.kind == "subtitle":
+            return _SUBTITLE_FORMATS.get(self.codec, self.codec)
+        profile = self.profile.lower()
+        if self.codec == "dts":
+            if "ma" in profile.replace("-", " ").split() or "master" in profile:
+                return "DTS-HD MA"
+            if "x" in profile.replace(":", " ").split() and "dts" in profile:
+                return "DTS:X"
+            if "high res" in profile or "hra" in profile:
+                return "DTS-HD HRA"
+            if "es" in profile.replace("-", " ").split():
+                return "DTS-ES"
+            return "DTS"
+        name = _AUDIO_FORMATS.get(self.codec, "PCM" if self.codec.startswith("pcm") else self.codec.upper())
+        if "atmos" in profile:
+            name += " Atmos"
+        return name
+
+    @property
+    def is_picture(self) -> bool:
+        return self.kind == "subtitle" and self.codec in PICTURE_SUBTITLES
+
+    def label(self) -> str:
+        """One line to pick it by, e.g.  English · DTS-HD MA 7.1 · default  or  French · Blu-ray picture (PGS) · forced."""
+        parts = [self.language_name or "Unknown language", self.format_name]
+        if self.kind == "audio":
+            parts[1] = f"{self.format_name} {_channel_text(self.channels)}".strip()
+        if self.title and self.title.lower() not in {p.lower() for p in parts}:
+            parts.append(self.title)
+        for flag, text in ((self.commentary, "commentary"), (self.forced, "forced"), (self.hearing_impaired, "for the hard of hearing"),
+                           (self.default, "default")):
+            if flag:
+                parts.append(text)
+        return " · ".join(parts)
+
+
+def _track_of(stream) -> Track:
+    ctx = stream.codec_context
+    meta = dict(stream.metadata or {})
+    try:
+        disposition = int(stream.disposition)
+    except Exception:  # noqa: BLE001 - an old or odd build: no flags
+        disposition = 0
+    title = str(meta.get("title") or meta.get("TITLE") or "")
+    profile = ""
+    try:
+        profile = str(ctx.profile or "")
+    except Exception:  # noqa: BLE001
+        profile = ""
+    commentary = bool(disposition & _DISPOSITION_COMMENT) or "commentary" in title.lower()
+    return Track(
+        kind="audio" if stream.type == "audio" else "subtitle", index=stream.index, codec=ctx.name or "",
+        language=str(meta.get("language") or meta.get("LANGUAGE") or ""), title=title,
+        channels=int(getattr(ctx, "channels", 0) or 0), sample_rate=int(getattr(ctx, "sample_rate", 0) or 0),
+        bit_rate=int(getattr(ctx, "bit_rate", 0) or 0), profile=profile,
+        default=bool(disposition & _DISPOSITION_DEFAULT), forced=bool(disposition & _DISPOSITION_FORCED),
+        commentary=commentary, hearing_impaired=bool(disposition & _DISPOSITION_HEARING),
+    )
+
+
+def list_tracks(path_or_container) -> tuple[list[Track], list[Track]]:
+    """(audio tracks, subtitle tracks) of a file, in the order they are stored. Nothing is decoded."""
+    import av
+
+    def read(container):
+        return ([_track_of(s) for s in container.streams.audio], [_track_of(s) for s in container.streams.subtitles])
+
+    if hasattr(path_or_container, "streams"):
+        return read(path_or_container)
+    with av.open(str(path_or_container)) as container:
+        return read(container)
+
+
+_LOSSLESS_AUDIO = frozenset({"truehd", "mlp", "flac", "alac"})
+
+
+def best_audio_index(audio: list[Track], language: str = "") -> int:
+    """Which audio track to use when the person has not chosen: the one marked default, else the first that is not a commentary.
+
+    With a ``language`` (an ISO 639-2 code) a track in that language wins, and among several the lossless or HD one.
+    -1 when there is no audio at all.
+    """
+    if not audio:
+        return -1
+    pool = [t for t in audio if not t.commentary] or list(audio)
+    if language:
+        same = [t for t in pool if t.language.lower() == language.lower()]
+        if same:
+            pool = same
+
+    def rank(t: Track) -> tuple:
+        return (t.default, t.codec in _LOSSLESS_AUDIO or t.format_name.startswith("DTS-HD"), t.channels, -t.index)
+
+    return max(pool, key=rank).index if language else (next((t for t in pool if t.default), pool[0])).index
+
+
 def probe(path: str | Path) -> VideoInfo:
     """Read a video's shape without decoding it."""
     import av
@@ -451,6 +605,31 @@ def _container_options(family: encoders.Family) -> dict[str, str]:
 # --- audio -----------------------------------------------------------------
 
 
+#: Audio an MP4 / MOV can carry as it is. TrueHD, DTS and DTS-HD are not on the list: they are turned into AAC instead of
+#: producing a file some players cannot open (an MKV keeps them untouched).
+MP4_AUDIO = frozenset({"aac", "ac3", "eac3", "mp3", "mp2", "alac", "opus", "flac"})
+
+
+def carry_video(video_only: Path, destination: Path) -> None:
+    """Put the finished picture at its destination: a plain copy when the container is the same, otherwise the packets are
+    moved into the new container (no re-encoding). This is what an MKV output needs when the picture was encoded as MP4."""
+    import av
+
+    if video_only.suffix.lower() == destination.suffix.lower():
+        shutil.copy2(video_only, destination)
+        return
+    with av.open(str(video_only)) as vid, av.open(str(destination), mode="w") as out:
+        stream = vid.streams.video[0]
+        out_stream = out.add_stream_from_template(stream)
+        for key, value in dict(stream.metadata).items():
+            out_stream.metadata[key] = value
+        for packet in vid.demux(stream):
+            if packet.dts is None:
+                continue
+            packet.stream = out_stream
+            out.mux(packet)
+
+
 def mux_audio(
     source: Path,
     video_only: Path,
@@ -459,41 +638,69 @@ def mux_audio(
     duration: float | None = None,
     audio: str = "copy",
     suffix: str = ".mp4",
+    audio_index: int = -1,
+    subtitle_index: int = -1,
 ) -> bool:
-    """Put the source's audio onto the converted video, trimmed to match.
+    """Put the source's audio (and, in an MKV, one subtitle track) onto the converted video, trimmed to match.
 
-    Returns True if audio was carried across, False if there was none (or it was
-    switched off). ``start`` and ``duration`` (seconds) are the window the video
-    covers: a converted In/Out range gets only its own slice of the soundtrack,
+    ``audio_index`` / ``subtitle_index`` are stream indexes as listed by :func:`list_tracks`; -1 means the best audio track
+    (:func:`best_audio_index`) and no subtitles. Subtitles are only carried into Matroska (``suffix == ".mkv"``), copied as they are
+    - text or picture - and re-timed to the converted range; other containers cannot hold the picture kinds, and PyAV cannot
+    convert one text format into another.
+
+    Returns True if audio was carried across, False if there was none (or it was switched off). ``start`` and ``duration``
+    (seconds) are the window the video covers: a converted In/Out range gets only its own slice of the soundtrack,
     re-timestamped to zero, rather than the whole track playing on over black.
     """
     import av
 
     with av.open(str(source)) as src:
-        if audio == "none" or not src.streams.audio:
-            shutil.copy2(video_only, destination)
+        audio_in = None
+        if audio != "none" and src.streams.audio:
+            wanted = audio_index if audio_index >= 0 else best_audio_index(list_tracks(src)[0])
+            audio_in = next((s for s in src.streams.audio if s.index == wanted), src.streams.audio[0])
+        sub_in = None
+        if suffix == ".mkv" and subtitle_index >= 0:
+            sub_in = next((s for s in src.streams.subtitles if s.index == subtitle_index), None)
+        if audio_in is None and sub_in is None:
+            carry_video(video_only, destination)
             return False
-        audio_in = src.streams.audio[0]
         trimming = start > 0 or duration is not None
-        codec = "libopus" if suffix == ".webm" else "aac"
+        end = None if duration is None else start + duration
 
         with av.open(str(video_only)) as vid, av.open(str(destination), mode="w") as out:
             video_in = vid.streams.video[0]
             video_out = out.add_stream_from_template(video_in)
+            for key, value in dict(video_in.metadata).items():
+                video_out.metadata[key] = value
 
             # Every output stream must exist before the first mux writes the
             # container header, so the audio stream is decided up front.
             remux = False
             audio_out = None
-            if not trimming and audio == "copy" and suffix != ".webm":
-                try:
-                    audio_out = out.add_stream_from_template(audio_in)
-                    remux = True
-                except Exception:  # noqa: BLE001 - container will not take it raw
-                    audio_out = None
-            if audio_out is None:
-                audio_out = out.add_stream(codec, rate=audio_in.rate)
-                audio_out.codec_context.time_base = Fraction(1, audio_in.rate)
+            if audio_in is not None:
+                codec = "libopus" if suffix == ".webm" else "aac"
+                codec_name = audio_in.codec_context.name
+                holds = (suffix == ".mkv" or (suffix == ".mov" and (codec_name.startswith("pcm") or codec_name in MP4_AUDIO))
+                         or (suffix == ".mp4" and codec_name in MP4_AUDIO))
+                if not trimming and audio == "copy" and suffix != ".webm" and holds:
+                    try:
+                        audio_out = out.add_stream_from_template(audio_in)
+                        remux = True
+                    except Exception:  # noqa: BLE001 - container will not take it raw
+                        audio_out = None
+                if audio_out is None:
+                    audio_out = out.add_stream(codec, rate=audio_in.rate)
+                    audio_out.codec_context.time_base = Fraction(1, audio_in.rate)
+                for key in ("language", "title"):                        # players show these in their track menus
+                    if audio_in.metadata.get(key):
+                        audio_out.metadata[key] = audio_in.metadata[key]
+            sub_out = None
+            if sub_in is not None:
+                sub_out = out.add_stream_from_template(sub_in)
+                for key in ("language", "title"):
+                    if sub_in.metadata.get(key):
+                        sub_out.metadata[key] = sub_in.metadata[key]
 
             for packet in vid.demux(video_in):
                 if packet.dts is None:
@@ -501,16 +708,34 @@ def mux_audio(
                 packet.stream = video_out
                 out.mux(packet)
 
-            if remux:
-                for packet in src.demux(audio_in):
-                    if packet.dts is None:
+            if audio_in is not None:
+                if remux:
+                    for packet in src.demux(audio_in):
+                        if packet.dts is None:
+                            continue
+                        packet.stream = audio_out
+                        out.mux(packet)
+                else:
+                    _reencode_audio_window(src, out, audio_in, audio_out, start if trimming else 0.0, end)
+
+            if sub_in is not None:
+                src.seek(0)                                              # the audio pass above read the file to its end
+                shift = round(start / float(sub_in.time_base)) if trimming else 0
+                for packet in src.demux(sub_in):
+                    stamp = packet.pts if packet.pts is not None else packet.dts
+                    if stamp is None:
                         continue
-                    packet.stream = audio_out
+                    seconds = stamp * float(packet.time_base)
+                    if seconds < start or (end is not None and seconds >= end):
+                        continue
+                    if shift:
+                        if packet.pts is not None:
+                            packet.pts -= shift
+                        if packet.dts is not None:
+                            packet.dts -= shift
+                    packet.stream = sub_out
                     out.mux(packet)
-            else:
-                end = None if duration is None else start + duration
-                _reencode_audio_window(src, out, audio_in, audio_out, start if trimming else 0.0, end)
-    return True
+    return audio_in is not None
 
 
 def _reencode_audio_window(src, out, audio_in, audio_out, start: float, end: float | None) -> None:

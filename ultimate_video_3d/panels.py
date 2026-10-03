@@ -25,7 +25,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from . import encoders, lut, paths, stereo
+from . import encoders, lut, paths, stereo, video
 from . import zones as zonesmod
 from .controls import (
     CollapsibleCard,
@@ -436,6 +436,7 @@ class ExportPanel(ModuleCard):
     """Format, encoder, quality, size, audio and HDR."""
 
     changed = Signal()
+    audio_track_chosen = Signal(int)              # position of the chosen audio track (so the preview can play that one)
 
     HEIGHTS = (("Same as source", 0), ("2160p (4K)", 2160), ("1440p", 1440), ("1080p", 1080), ("720p", 720))
 
@@ -484,6 +485,32 @@ class ExportPanel(ModuleCard):
         self.audio_box.currentIndexChanged.connect(lambda: self._set("audio", self.audio_box.currentData()))
         self.add_layout(_row("Audio", self.audio_box))
 
+        # The tracks of the open file, once there is one: which sound to keep and which subtitles (see video.list_tracks).
+        self._audio_tracks: list = []
+        self._subtitle_tracks: list = []
+        self.audio_track_box = QComboBox()
+        self.audio_track_box.currentIndexChanged.connect(self._audio_track)
+        self.audio_track_row = _row("Audio track", self.audio_track_box)
+        self.add_layout(self.audio_track_row)
+        self.audio_note = QLabel("")
+        self.audio_note.setObjectName("hint")
+        self.audio_note.setWordWrap(True)
+        self.add(self.audio_note)
+        self.subtitle_box = QComboBox()
+        self.subtitle_box.currentIndexChanged.connect(self._subtitle_track)
+        self.subtitle_row = _row("Subtitles", self.subtitle_box)
+        self.add_layout(self.subtitle_row)
+        self.container_box = QComboBox()
+        self.container_box.addItem("Same as the format", "auto")
+        self.container_box.addItem("Matroska (MKV)", "mkv")
+        self.container_box.setCurrentIndex(max(0, self.container_box.findData(s.container)))
+        self.container_box.currentIndexChanged.connect(self._container)
+        self.container_box.setToolTip("MKV keeps subtitles and lossless audio (TrueHD, DTS-HD) exactly as they are; MP4 turns that "
+                                      "sound into AAC and cannot hold subtitles.")
+        self.container_row = _row("Save as", self.container_box)
+        self.add_layout(self.container_row)
+        self._show_track_rows()
+
         self.hdr_box = QComboBox()
         self.hdr_box.addItem("Keep HDR (10-bit)", "keep")
         self.hdr_box.addItem("Convert to SDR", "tonemap")
@@ -502,6 +529,94 @@ class ExportPanel(ModuleCard):
                                   "scroll to zoom for a precise edit.")
         self.add_layout(_row("Range", self.range_box))
         self._family()
+
+    # -- the open file's audio and subtitle tracks ----------------------------------------------------------
+
+    def set_tracks(self, audio: list, subtitles: list) -> None:
+        """Show the tracks of the file that was just opened (video.Track lists) and go back to the defaults for it."""
+        self._audio_tracks, self._subtitle_tracks = list(audio), list(subtitles)
+        self._s.audio_track = self._s.subtitle_track = -1
+        for box in (self.audio_track_box, self.subtitle_box):
+            box.blockSignals(True)
+            box.clear()
+        self.audio_track_box.addItem("Best available (automatic)", -1)
+        for track in self._audio_tracks:
+            self.audio_track_box.addItem(track.label(), track.index)
+        self.subtitle_box.addItem("None", -1)
+        for track in self._subtitle_tracks:
+            self.subtitle_box.addItem(track.label(), track.index)
+        for box in (self.audio_track_box, self.subtitle_box):
+            box.setCurrentIndex(0)
+            box.blockSignals(False)
+        self._show_track_rows()
+        self.changed.emit()
+
+    def choose_tracks(self, audio_index: int, subtitle_index: int) -> None:
+        """Select tracks by stream index (the folder dialog's choice for the file it opened)."""
+        for box, value in ((self.audio_track_box, audio_index), (self.subtitle_box, subtitle_index)):
+            at = box.findData(value)
+            if at >= 0:
+                box.setCurrentIndex(at)
+
+    def set_container(self, container: str) -> None:
+        at = self.container_box.findData(container)
+        if at >= 0:
+            self.container_box.setCurrentIndex(at)
+
+    def _wants_mkv(self) -> bool:
+        family = encoders.FAMILIES_BY_KEY[self.family_box.currentData()]
+        return family.suffix == ".mkv" or (family.suffix == ".mp4" and self._s.container == "mkv")
+
+    def _show_track_rows(self) -> None:
+        many_audio = len(self._audio_tracks) > 1
+        for row, visible in ((self.audio_track_row, many_audio), (self.subtitle_row, bool(self._subtitle_tracks))):
+            for i in range(row.count()):
+                widget = row.itemAt(i).widget()
+                if widget is not None:
+                    widget.setVisible(visible)
+        family = encoders.FAMILIES_BY_KEY[self.family_box.currentData()]
+        for i in range(self.container_row.count()):
+            widget = self.container_row.itemAt(i).widget()
+            if widget is not None:
+                widget.setVisible(family.suffix == ".mp4")
+        self.subtitle_box.setEnabled(self._wants_mkv())
+        self.subtitle_box.setToolTip("" if self._wants_mkv() else
+                                     "Subtitles are kept in MKV files: choose one and 'Save as' switches to MKV.")
+        self.audio_note.setVisible(False)
+        track = next((t for t in self._audio_tracks if t.index == self._s.audio_track), None)
+        if track is not None and self._s.audio == "copy" and not self._wants_mkv() and \
+                track.codec not in video.MP4_AUDIO and not track.codec.startswith("pcm"):
+            self.audio_note.setText(f"{track.format_name} cannot go in an MP4 as it is, so it becomes AAC. "
+                                    "Choose 'Save as: Matroska (MKV)' to keep it untouched.")
+            self.audio_note.setVisible(True)
+
+    def _audio_track(self) -> None:
+        self._s.audio_track = int(self.audio_track_box.currentData() if self.audio_track_box.currentData() is not None else -1)
+        self._show_track_rows()
+        self.changed.emit()
+        self.audio_track_chosen.emit(self._ordinal_of(self._s.audio_track))
+
+    def _ordinal_of(self, index: int) -> int:
+        """Position among the audio tracks (what the preview player counts by); the best one when none is chosen."""
+        if index < 0:
+            index = video.best_audio_index(self._audio_tracks)
+        return next((i for i, t in enumerate(self._audio_tracks) if t.index == index), -1)
+
+    def _subtitle_track(self) -> None:
+        self._s.subtitle_track = int(self.subtitle_box.currentData() if self.subtitle_box.currentData() is not None else -1)
+        if self._s.subtitle_track >= 0 and self._s.container != "mkv" and \
+                encoders.FAMILIES_BY_KEY[self.family_box.currentData()].suffix == ".mp4":
+            self.set_container("mkv")                             # a subtitle can only be kept in an MKV: switch for them
+        self._show_track_rows()
+        self.changed.emit()
+
+    def _container(self) -> None:
+        self._s.container = self.container_box.currentData() or "auto"
+        if self._s.container != "mkv" and self._s.subtitle_track >= 0 and \
+                encoders.FAMILIES_BY_KEY[self.family_box.currentData()].suffix == ".mp4":
+            self.subtitle_box.setCurrentIndex(0)                  # no MKV, no subtitles
+        self._show_track_rows()
+        self.changed.emit()
 
     def set_probe(self, report: encoders.ProbeReport | None) -> None:
         self._probe = report
@@ -544,6 +659,8 @@ class ExportPanel(ModuleCard):
             if item is not None:
                 item.setVisible(bool(fam.profiles))
         self._fill_encoders()
+        if hasattr(self, "container_row"):
+            self._show_track_rows()
         self.changed.emit()
 
     def _encoder(self) -> None:
