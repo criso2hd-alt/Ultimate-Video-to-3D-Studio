@@ -25,7 +25,7 @@ import numpy as np
 
 from . import depth as depthmod
 from . import resume as resumemod
-from . import encoders, grade, hdr, paths, stereo, sysinfo, video
+from . import encoders, grade, hdr, paths, ratecontrol, stereo, sysinfo, video
 from .settings import AppSettings
 
 Progress = Callable[[str], None]
@@ -58,6 +58,27 @@ def output_path_for(source: Path, settings: AppSettings, folder: Path | None = N
     else:
         tag = "_converted"
     return (folder or paths.output_dir()) / f"{source.stem}{tag}{output_suffix(settings.export)}"
+
+
+def audio_bps_for_export(source, export, tracks=None) -> int:
+    """What the chosen sound adds to the output file, for the size estimates (see ratecontrol.audio_bps)."""
+    if tracks is None:
+        try:
+            tracks = video.list_tracks(source)[0]
+        except Exception:  # noqa: BLE001 - only an estimate
+            tracks = []
+    wanted = export.audio_track if export.audio_track >= 0 else video.best_audio_index(tracks)
+    track = next((t for t in tracks if t.index == wanted), None)
+    mkv = output_suffix(export) == ".mkv"
+    if track is None:
+        return ratecontrol.audio_bps(export.audio, mkv=mkv) if export.audio != "none" else 0
+    return ratecontrol.audio_bps(export.audio, track.codec, track.bit_rate, track.channels or 2, mkv)
+
+
+def _audio_bps_for(source, info, export, from_disc: bool) -> int:
+    if from_disc:
+        return ratecontrol.audio_bps(export.audio, info.audio_codec, 0, 2, output_suffix(export) == ".mkv") if info.has_audio else 0
+    return audio_bps_for_export(source, export) if info.has_audio else 0
 
 
 def eye_size(info: video.VideoInfo, settings: AppSettings) -> tuple[int, int]:
@@ -273,15 +294,19 @@ def convert_video(
     if base and limit is not None and base >= limit:
         read_limit = 0                       # everything was already encoded: only the join is left
 
+    seconds = total / info.fps if info.fps else 0.0
+    bitrate = ratecontrol.video_bitrate(export, family.uses_quality, seconds, _audio_bps_for(source, info, export, from_disc))
     writer = video.SegmentedWriter(
         state, family, encoder, info.fps, (out_w, out_h), export.quality, profile, signal,
-        layout.stereo_mode if threed.enabled else "", resumemod.SEGMENT_FRAMES,
+        layout.stereo_mode if threed.enabled else "", resumemod.SEGMENT_FRAMES, bitrate_bps=bitrate,
     )
     async_writer = _Writer(writer)
     async_writer.start()
     yield VideoProgress("starting", total=total, encoder=encoder,
                         message=(f"Resuming at {round(100 * base / total)}% with " if base and total else
-                                 "Encoding with ") + encoders.encoder_label(encoder))
+                                 "Encoding with ") + encoders.encoder_label(encoder)
+                        + (f" at {bitrate / 1e6:.1f} Mb/s" + (f", aiming for {ratecontrol.describe_size(export.target_mb)}"
+                                                               if export.rate_mode == "size" else "") if bitrate else ""))
 
     grader = grade.GradeEngine()
     refine_mode = threed.depth_quality if threed.depth_quality in (depthmod.SMOOTH, depthmod.SMOOTH_HIGH) \

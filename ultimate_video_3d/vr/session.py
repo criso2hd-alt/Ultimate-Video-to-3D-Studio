@@ -28,6 +28,7 @@ from dataclasses import dataclass, field
 import numpy as np
 from PySide6.QtCore import QObject, Signal
 
+from .. import bars
 from . import geometry as geo
 from . import room as roommod
 from .media import VRMedia
@@ -413,6 +414,7 @@ class VRSession(QObject):
             screen.aspect = media.aspect
             screen.floor_clearance = 0.12 if self.scene == ROOM else None    # on the room's floor, or at eye height
         renderer.beam_on, renderer.beam_level = self.beam_on, self.beam_level
+        renderer.crop = getattr(media, "crop", bars.NONE)
         if self.room is not None:
             renderer.room_light = self._lights.update(dt, media.playing, media.is_open, self.room.light_level_paused)
         self._sync_menu(renderer, dt)

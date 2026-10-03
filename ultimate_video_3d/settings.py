@@ -44,6 +44,11 @@ class ExportSettings:
     #: "auto" picks the best working encoder for this machine; otherwise a name.
     encoder: str = "auto"
     quality: int = 60
+    #: What the encode follows: "quality" (the slider), "bitrate" (``video_kbps``) or "size" (``target_mb`` for the whole file).
+    #: Whichever the person changed last; the other two are shown as what it works out to (see ratecontrol.py).
+    rate_mode: str = "quality"
+    video_kbps: int = 8000
+    target_mb: float = 0.0
     profile: int = 0                # index into the family's profiles
     audio: str = "copy"             # "copy" | "aac" | "none"
     #: Which audio track of the source (its stream index; -1 = the best one, see video.best_audio_index) and which subtitle track
@@ -84,6 +89,7 @@ class AppSettings:
     vr_room_dir: str = ""                # a baked VR room folder; "" = the first one found, or the plain stand-in room
     vr_auto_connect: bool = True         # on the Library tab, look for a headset and get ready for it by itself
     vr_audio_device: str = ""            # the sound device chosen in the headset's menu; "" = the headset's own, automatically
+    vr_trim_bars: bool = True            # show a film's real picture on the VR screen, without the black bars burned into its frame
     vr_beam: bool = True                 # the projector's light beam through the room's air (the lens glows either way)
     vr_beam_level: float = 1.0           # how bright that beam is: 0.25 .. 2.0 times the normal strength
     #: The first-launch encoder probe (see encoders.ProbeReport), or {} if not run.
@@ -140,6 +146,8 @@ class AppSettings:
             settings.check_updates = raw["check_updates"]
         if isinstance(raw.get("vr_auto_connect"), bool):
             settings.vr_auto_connect = raw["vr_auto_connect"]
+        if isinstance(raw.get("vr_trim_bars"), bool):
+            settings.vr_trim_bars = raw["vr_trim_bars"]
         if isinstance(raw.get("vr_beam"), bool):
             settings.vr_beam = raw["vr_beam"]
         if isinstance(raw.get("vr_beam_level"), (int, float)) and not isinstance(raw.get("vr_beam_level"), bool):

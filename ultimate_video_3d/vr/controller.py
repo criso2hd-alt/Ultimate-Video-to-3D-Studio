@@ -61,6 +61,7 @@ class VRController(QObject):
         self._probe_fn = probe or headset_present
         self._audio_outputs_fn = audio_outputs or qt_audio_outputs
         self.audio_choice = ""               # "" = automatic (the headset's device if there is one)
+        self.trim_bars = True                           # leave a film's burned-in black bars off the screen (the app's settings fill this in)
         self.beam_on, self.beam_level = True, 1.0       # the projector's beam in the room (the app's settings fill these in)
         self._watching = self._paused = self._probing = False
         self._timer = QTimer(self)
@@ -122,6 +123,7 @@ class VRController(QObject):
             self.media.failed.connect(self.notice)
         self.apply_audio()
         self.apply_beam()
+        self.apply_trim()
 
     def use_room(self, folder: str | Path | None) -> bool:
         """Choose the room to sit in (None for the plain stand-in). Returns False, with a notice, if it cannot be loaded."""
@@ -292,6 +294,14 @@ class VRController(QObject):
             self.media.set_audio_device(device)
         if self.session is not None and hasattr(self.session, "set_audio_label"):
             self.session.set_audio_label(self.audio_label())
+
+    def apply_trim(self) -> None:
+        if self.media is not None and hasattr(self.media, "trim_bars"):
+            self.media.trim_bars = self.trim_bars
+
+    def set_trim_bars(self, on: bool) -> None:
+        self.trim_bars = bool(on)
+        self.apply_trim()
 
     def apply_beam(self) -> None:
         if self.session is not None and hasattr(self.session, "set_beam"):

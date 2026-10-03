@@ -373,6 +373,25 @@ ray with five planes and sums 8 haze samples, tinted by the part of the picture 
 and the *lens* (`_LENS_FS`: a camera-facing sprite, as bright as the picture). The beam alone has an on/off switch and a brightness
 (`BEAM_LEVELS` 25%..200%): the headset menu's Beam row, Settings > Virtual reality, `settings.vr_beam` / `vr_beam_level`,
 `VRController.set_beam` / `beam_changed`. The lens always glows. Do not name a renderer method `_draw_beam`: that is the pointer ray.
+**Quality / bitrate / file size (`ratecontrol.py`, ExportPanel).** Three linked controls for one choice: the Quality slider, a video bitrate
+(kb/s) and a file size (MB). `ExportSettings.rate_mode` ("quality" | "bitrate" | "size") is whichever the person changed last and is what the
+encode follows; the other two are shown as what it works out to (`ExportPanel._sync_rates`, with `set_rate_context` fed by
+`MainWindow._rate_context`: output frame size, fps, length of the In/Out range, sound bits/s; it is refreshed on file, layout, range, sound and format
+changes). Quality -> bitrate is an *estimate* (bits-per-pixel model x codec efficiency, `ratecontrol.bitrate_for_quality`); a typed bitrate or
+size is aimed at for real: `encoders.bitrate_options` per encoder, `VideoWriter(bitrate_bps=)`, `pipeline.convert_video` turns a size into a bitrate
+(`video_bps_for_size`: size / length minus the sound, which counts what will really be stored - copied DTS-HD in an MKV, AAC in an MP4). Measured
+here: x264/x265/SVT-AV1 within 1-9%, NVENC ~10% over (so `bitrate_bias` 0.95 and a ceiling equal to the target), libvpx-vp9 1-pass 1.4-1.9x over whatever
+the options (the panel says so). Resumed jobs hash the new fields, so a different target starts fresh. "Save as" now says MP4 (it used to say
+"Same as the format"), and the MKV a subtitle asks for undoes itself when the subtitle is dropped or another file opens (`_auto_mkv`).
+**Black bars (`bars.py`).** Many films are 2.35:1 with the bars burned into a 16:9 frame. `bars.detect` samples 24 frames (0.9 s on a 25 GB rip) and
+reports, per eye picture, how much of each side is black in all of them (a row is picture if 0.5% of it is bright in >= 2 frames, so dark scenes
+and subtitles can only make bars look smaller; one row of bar is kept). `VRMedia` scans in a background thread when a film opens, `VRMedia.crop` /
+`.aspect` give the real picture, the renderer shows `crop_rect(rect, crop)` (so the glow and beam follow) and the room's screen fits that shape.
+Settings > VR > "Cut the black bars off wide films" (`vr_trim_bars`). Not applied to conversions. Desktop preview unchanged.
+**Home theatre screen is now cinematic (room v4).** `scripts/blender/set_screen_size.py` makes a copy of the .blend with only the Screen quad resized
+(6.6 x 2.76 m, 2.39:1, same bottom edge) and `bake_room.py --phase export` re-exports into a copy of the bake folder: nothing is re-baked and every
+other piece (groups, glow planes, seats, lens) is identical to v3 (checked). The owner's own .blend files are untouched; their working file still has
+the old screen unless they apply the same numbers.
 **Next rooms (2026-10-03): blockouts made, owner models them.** `scripts/blender/make_blockout.py imax|drivein <out.blend>` writes a rough
 starting file in the home theatre's layout (never overwrites; `--force` to). *Grand Cinema* (`room_imax_blockout.blend`): a huge IMAX
 house, screen 28 x 14.7 m (1.9:1), 20 stadium rows (1.2 m tread, 0.3 m riser), only the centre seat of each row (`Seat_R<k>_Centre`,

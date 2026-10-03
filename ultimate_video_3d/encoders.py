@@ -293,10 +293,44 @@ def bitrate_for(size: tuple[int, int], fps: float, quality: int, family_key: str
     Bits-per-pixel is scaled by codec efficiency, and by the slider so 50 is a
     sensible streaming rate and 100 is near-transparent.
     """
-    width, height = size
-    efficiency = {"h264": 1.0, "h265": 0.62, "av1": 0.5}.get(family_key, 1.0)
-    bpp = (0.03 + 0.17 * (quality / 100.0) ** 2) * efficiency
-    return int(width * height * fps * bpp)
+    from . import ratecontrol
+
+    return ratecontrol.bitrate_for_quality(size, fps, quality, family_key)
+
+
+def bitrate_bias(encoder: str) -> float:
+    """By how much to aim under the bitrate asked for, because the encoder is known to land over it (measured: NVENC, ~5%)."""
+    return 0.95 if encoder.endswith("_nvenc") else 1.0
+
+
+def bitrate_options(encoder: str, family: Family, bps: int) -> dict[str, str]:
+    """Settings for an encode that aims at a bitrate instead of a quality (the bitrate itself goes on the stream).
+
+    Single-pass average-bitrate modes with a ceiling at 1.5x, so a hard scene can borrow a little without a spike that
+    breaks a player's buffer. ProRes / DNxHR / FFV1 have no such mode and never come here.
+    """
+    peak = int(bps * 1.5)
+    if encoder == "libx264":
+        return {"preset": "medium", "maxrate": str(peak), "bufsize": str(peak * 2)}
+    if encoder == "libx265":
+        return {"preset": "medium", "x265-params": f"log-level=none:vbv-maxrate={peak // 1000}:vbv-bufsize={peak * 2 // 1000}"}
+    if encoder == "libsvtav1":
+        return {"preset": "8"}
+    if encoder == "libvpx-vp9":
+        return {"deadline": "good", "cpu-used": "4", "row-mt": "1"}
+    if encoder.endswith("_nvenc"):
+        # Measured on an NVIDIA card: with the ceiling at 1.5x it ran 10-15% over the bitrate; at the bitrate itself, within ~10%
+        # (and see bitrate_bias, which aims a little under).
+        return {"rc": "vbr", "preset": "p5", "tune": "hq", "maxrate": str(bps), "bufsize": str(bps * 2)}
+    if encoder.endswith("_amf"):
+        return {"rc": "vbr_peak", "quality": "quality", "maxrate": str(int(bps * 1.1))}
+    if encoder.endswith("_qsv"):
+        return {"preset": "medium", "maxrate": str(int(bps * 1.1))}
+    if encoder.endswith("_videotoolbox"):
+        return {"allow_sw": "0"}
+    if encoder.endswith("_mf"):
+        return {"rate_control": "unconstrained_vbr", "hw_encoding": "1"}
+    return {}
 
 
 def encoder_options(encoder: str, family: Family, quality: int, size: tuple[int, int],

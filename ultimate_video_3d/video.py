@@ -234,6 +234,15 @@ def _track_of(stream) -> Track:
         codec = str(ctx.codec.canonical_name or ctx.name or "")
     except Exception:  # noqa: BLE001 - an older build: fall back to the decoder name
         codec = str(ctx.name or "")
+    bit_rate = int(getattr(ctx, "bit_rate", 0) or 0)
+    if not bit_rate:
+        for key, value in meta.items():
+            if key.upper().startswith("BPS"):                       # MakeMKV: "BPS-eng": "2973162"
+                try:
+                    bit_rate = int(value)
+                except ValueError:
+                    pass
+                break
     lines = 0
     if stream.type != "audio":
         for key, value in meta.items():
@@ -246,7 +255,7 @@ def _track_of(stream) -> Track:
         kind="audio" if stream.type == "audio" else "subtitle", index=stream.index, codec=codec, lines=lines,
         language=str(meta.get("language") or meta.get("LANGUAGE") or ""), title=title,
         channels=int(getattr(ctx, "channels", 0) or 0), sample_rate=int(getattr(ctx, "sample_rate", 0) or 0),
-        bit_rate=int(getattr(ctx, "bit_rate", 0) or 0), profile=profile,
+        bit_rate=bit_rate, profile=profile,
         default=bool(disposition & _DISPOSITION_DEFAULT), forced=bool(disposition & _DISPOSITION_FORCED),
         commentary=commentary, hearing_impaired=bool(disposition & _DISPOSITION_HEARING),
     )
@@ -454,6 +463,7 @@ class VideoWriter:
         profile: encoders.Profile | None = None,
         hdr: str = SDR,
         stereo_mode: str = "",
+        bitrate_bps: int = 0,
     ) -> None:
         import av
 
@@ -472,9 +482,13 @@ class VideoWriter:
         self._stream.width, self._stream.height = self.size
         self._stream.pix_fmt = self._pix_fmt
         ctx = self._stream.codec_context
-        ctx.options = encoders.encoder_options(encoder, family, quality, self.size, fps, profile)
-        if encoder.endswith("_videotoolbox") or (encoder.endswith("_mf") and False):
-            self._stream.bit_rate = encoders.bitrate_for(self.size, fps, quality, family.key)
+        if bitrate_bps > 0 and family.uses_quality:                   # aim at a bitrate (or the bitrate a file size works out to)
+            ctx.options = encoders.bitrate_options(encoder, family, bitrate_bps)
+            self._stream.bit_rate = int(bitrate_bps * encoders.bitrate_bias(encoder))
+        else:
+            ctx.options = encoders.encoder_options(encoder, family, quality, self.size, fps, profile)
+            if encoder.endswith("_videotoolbox") or (encoder.endswith("_mf") and False):
+                self._stream.bit_rate = encoders.bitrate_for(self.size, fps, quality, family.key)
         if not encoders.is_hardware(encoder):
             self._stream.thread_type = "AUTO"
         if family.key == "h265" and family.suffix == ".mp4":
@@ -538,9 +552,9 @@ class SegmentedWriter:
     """
 
     def __init__(self, state, family: encoders.Family, encoder: str, fps: float, size: tuple[int, int],
-                 quality: int, profile, hdr: str, stereo_mode: str, segment_frames: int) -> None:
+                 quality: int, profile, hdr: str, stereo_mode: str, segment_frames: int, bitrate_bps: int = 0) -> None:
         self._state, self._family = state, family
-        self._args = (encoder, fps, size, quality, profile, hdr, stereo_mode)
+        self._args = (encoder, fps, size, quality, profile, hdr, stereo_mode, bitrate_bps)
         self._limit = max(1, segment_frames)
         self._writer: VideoWriter | None = None
         self._path: Path | None = None
@@ -552,9 +566,9 @@ class SegmentedWriter:
     def _open(self) -> None:
         self._path = self._state.next_segment_path(self._family.suffix)
         self._state.folder.mkdir(parents=True, exist_ok=True)
-        encoder, fps, size, quality, profile, hdr, stereo_mode = self._args
+        encoder, fps, size, quality, profile, hdr, stereo_mode, bitrate_bps = self._args
         self._writer = VideoWriter(self._path, self._family, encoder, fps, size, quality, profile, hdr=hdr,
-                                   stereo_mode=stereo_mode)
+                                   stereo_mode=stereo_mode, bitrate_bps=bitrate_bps)
         self._count = 0
 
     @property

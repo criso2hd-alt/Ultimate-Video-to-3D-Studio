@@ -714,6 +714,10 @@ class SettingsPage(QWidget):
         self.vr_auto.setToolTip("While the Library is open the app looks for a headset every few seconds and connects to it "
                                 "by itself, so you can put the headset on without touching the keyboard or the mouse. "
                                 "Leaving VR from the headset's menu pauses this until you ask for VR again.")
+        self.vr_trim = QCheckBox("Cut the black bars off wide films")
+        self.vr_trim.setChecked(settings.vr_trim_bars)
+        self.vr_trim.setToolTip("Many films are stored as a 16:9 picture with black bars burned in above and below. The VR screen then "
+                                "shows only the real picture, so a wide film fills a wide screen. Nothing in the file is changed.")
         self.vr_beam = QCheckBox("Show the projector's light beam in the room")
         self.vr_beam.setChecked(settings.vr_beam)
         self.vr_beam.setToolTip("The faint beam of light from the ceiling projector to the screen, while a film plays with the lights "
@@ -734,7 +738,7 @@ class SettingsPage(QWidget):
         self.vr_room_button.setToolTip("A folder with room.glb and room.json (a baked home theatre).")
         self.vr_room_clear = QPushButton("Use the plain room")
         self.vr_room_clear.setObjectName("secondary")
-        for widget in (self.vr_status, self.vr_auto, self.vr_beam):
+        for widget in (self.vr_status, self.vr_auto, self.vr_trim, self.vr_beam):
             vr_card.add(widget)
         vr_card.add_layout(beam_row)
         for widget in (self.vr_room_label, self.vr_room_button, self.vr_room_clear):
@@ -1162,6 +1166,9 @@ class MainWindow(QMainWindow):
         page.lut.changed.connect(self._params_changed)
         page.export.changed.connect(self._export_changed)
         page.export.range_box.currentIndexChanged.connect(self._range_mode)
+        page.export.set_rate_context(self._rate_context)
+        page.timeline.in_changed.connect(lambda _f: page.export.refresh_rates())
+        page.timeline.out_changed.connect(lambda _f: page.export.refresh_rates())
         for key, button in page.mode_buttons.items():
             button.clicked.connect(lambda _c=False, k=key: self._set_mode(k))
         page.preview.clicked.connect(self._picture_clicked)
@@ -1178,6 +1185,8 @@ class MainWindow(QMainWindow):
         sp.vr_auto.toggled.connect(self._vr_auto_changed)
         self.vr.audio_choice = self.settings.vr_audio_device
         self.vr.audio_choice_changed.connect(self._vr_audio_chosen)
+        self.vr.trim_bars = self.settings.vr_trim_bars
+        sp.vr_trim.toggled.connect(self._vr_trim_changed)
         self.vr.beam_on, self.vr.beam_level = self.settings.vr_beam, self.settings.vr_beam_level
         self.vr.beam_changed.connect(self._vr_beam_from_headset)
         sp.vr_beam.toggled.connect(self._vr_beam_from_settings)
@@ -1440,7 +1449,23 @@ class MainWindow(QMainWindow):
         self.player.set_proxy_height(int(height))
         self._save_timer.start()
 
+    def _rate_context(self):
+        """What the export panel needs to turn quality into a bitrate and a file size: the output picture, its rate, its length, the sound."""
+        page = self.video_page
+        info = page.disc_stream.info if page.disc_stream is not None else page.info
+        if info is None or not info.fps:
+            return None
+        frames = info.frames or round(info.duration * info.fps)
+        if self.settings.export.range_mode == "range" and page.disc_stream is None:
+            first, last = page.timeline.in_out()
+            frames = max(1, last - first + 1)
+        audio = 0
+        if info.has_audio:
+            audio = pipeline.audio_bps_for_export(page.source, self.settings.export, page.export._audio_tracks)
+        return pipeline.frame_size_for(info, self.settings), info.fps, frames / info.fps, audio
+
     def _params_changed(self) -> None:
+        self.video_page.export.refresh_rates()                       # the 3D layout changes the frame, and so the file size
         self._submit(new_frame=False)
         self._sync_mode_buttons()
         self._save_timer.start()
@@ -1455,6 +1480,7 @@ class MainWindow(QMainWindow):
 
     def _range_mode(self) -> None:
         self.video_page.timeline.set_range_mode(self.video_page.export.range_box.currentData() == "range")
+        self.video_page.export.refresh_rates()
 
     def _theme_changed(self, name: str) -> None:
         self.settings.theme = name
@@ -1974,6 +2000,11 @@ class MainWindow(QMainWindow):
         self.settings.vr_auto_connect = on
         self.settings.save(paths.settings_path())
         self._update_vr_watch()
+
+    def _vr_trim_changed(self, on: bool) -> None:
+        self.settings.vr_trim_bars = on
+        self.settings.save(paths.settings_path())
+        self.vr.set_trim_bars(on)
 
     def _vr_beam_from_settings(self, *_) -> None:
         sp = self.settings_page

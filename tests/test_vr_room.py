@@ -154,13 +154,15 @@ def gl():
     glfw.terminate()
 
 
-def _shot(room, picture, light, orientation=(0, 0, 0, 1), beam=(True, 1.0)):
+def _shot(room, picture, light, orientation=(0, 0, 0, 1), beam=(True, 1.0), crop=None):
     """Draw the room from its seat (looking at the screen unless turned), with this picture on it and these room lights."""
     r = rend.Renderer()
     r.init_gl()
     r.set_room(room)
     r.room_light = light
     r.beam_on, r.beam_level = beam
+    if crop is not None:
+        r.crop = crop
     r.upload(picture)
     r.gain = 1.0
     seat = room.first_seat()
@@ -282,3 +284,14 @@ def test_a_room_without_a_projector_draws_no_beam_or_lens(gl, room):
     assert room.projector_lens is None
     loud = _shot(room, WHITE, 0.0, LOOK_UP, beam=(True, 2.0)).sum()
     assert abs(loud - _shot(room, WHITE, 0.0, LOOK_UP, beam=(False, 0.25)).sum()) < 5000       # (only the shaders' random dithering differs)
+
+
+def test_trimming_black_bars_shows_only_the_real_picture_on_the_screen(gl, room):
+    from ultimate_video_3d.bars import Crop
+
+    frame = np.zeros((720, 1280, 3), np.uint8)                                   # a 2.35:1 film in a 16:9 frame: bars above and below
+    frame[90:630] = (230, 230, 230)
+    near_top = (50, W // 2)                                                        # a few pixels inside the screen's top edge
+    whole = _shot(room, frame, light=0.0)
+    trimmed = _shot(room, frame, light=0.0, crop=Crop(top=0.12, bottom=0.12))
+    assert whole[near_top].sum() < 200 and trimmed[near_top].sum() > 450          # the bar is black; with the bars cut the picture reaches the edge

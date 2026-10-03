@@ -16,6 +16,7 @@ import time
 import numpy as np
 from OpenGL import GL
 
+from .. import bars
 from . import geometry as geo
 
 ROOM, VOID, BAKED = "room", "void", "baked"
@@ -396,6 +397,7 @@ class Renderer:
         self.room = None                       # a vr.room.Room, once set_room() has been called
         self._room_gl = None                   # its OpenGL objects, made on first use
         self.room_light = 1.0                  # 0 = film lighting, 1 = lights up
+        self.crop = bars.NONE                  # black bars to leave out of the picture (see bars.py); the screen then fits what is left
         self.beam_on = True                    # the ceiling projector's light beam (the lens of the room's projector glows either way)
         self.beam_level = 1.0                  # ... and how bright it is: 0.25 .. 2.0 times the normal strength
         self.edge_colours = np.zeros((4, 3), np.float32)       # top, bottom, left, right of the picture, 0..1
@@ -734,7 +736,7 @@ class Renderer:
         GL.glClearColor(0.01, 0.01, 0.015, 1.0)
         GL.glClear(GL.GL_COLOR_BUFFER_BIT | GL.GL_DEPTH_BUFFER_BIT)
         vp = projection @ view
-        rect = geo.eye_uv_rect(layout, eye)
+        rect = bars.crop_rect(geo.eye_uv_rect(layout, eye), self.crop)
         now = float(time.monotonic() % 1000.0)
         model = screen.model_matrix()
 

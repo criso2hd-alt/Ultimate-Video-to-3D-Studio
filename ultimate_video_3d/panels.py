@@ -20,12 +20,13 @@ from PySide6.QtWidgets import (
     QHBoxLayout,
     QLabel,
     QPushButton,
+    QSpinBox,
     QStackedWidget,
     QVBoxLayout,
     QWidget,
 )
 
-from . import encoders, lut, paths, stereo, video
+from . import encoders, lut, paths, ratecontrol, stereo, video
 from . import zones as zonesmod
 from .controls import (
     CollapsibleCard,
@@ -466,9 +467,42 @@ class ExportPanel(ModuleCard):
         self.add_layout(self._profile_row)
 
         self.quality = ParamSlider("Quality", 0, 100, s.quality, 60, 0,
-                                   tooltip="Higher is larger and closer to the original. 60 is a good default.")
-        self.quality.changed.connect(lambda v: self._set("quality", int(v)))
+                                   tooltip="Higher is larger and closer to the original. 60 is a good default. The bitrate and the "
+                                           "file size below move with it (as estimates); type either of them to aim at it exactly.")
+        self.quality.changed.connect(self._quality_moved)
         self.add(self.quality)
+
+        # Quality, bitrate and file size are one choice seen three ways: change one and the others follow (see ratecontrol.py).
+        self._rate_context = None                      # asks the window: ((width, height), fps, seconds, audio bits/s) or None
+        self._syncing = False
+        self.bitrate_box = QSpinBox()
+        self.bitrate_box.setRange(100, 2_000_000)
+        self.bitrate_box.setSingleStep(250)
+        self.bitrate_box.setSuffix(" kb/s")
+        self.bitrate_box.setKeyboardTracking(False)    # a typed number counts when it is finished, not at every digit
+        self.bitrate_box.setMinimumWidth(130)
+        self.bitrate_box.setToolTip("The video's bitrate. Type one to make the encode aim at it; the quality and the file size follow.")
+        self.bitrate_box.valueChanged.connect(self._bitrate_typed)
+        self.size_box = QSpinBox()
+        self.size_box.setRange(1, 100_000_000)
+        self.size_box.setSingleStep(50)
+        self.size_box.setSuffix(" MB")
+        self.size_box.setKeyboardTracking(False)
+        self.size_box.setMinimumWidth(130)
+        self.size_box.setToolTip("The size of the whole file (picture and sound) for the part you are converting. Type one to make the "
+                                 "encode land on it; the bitrate and the quality follow.")
+        self.size_box.valueChanged.connect(self._size_typed)
+        self.rate_note = QLabel("")
+        self.rate_note.setObjectName("hint")
+        self.rate_note.setWordWrap(True)
+        self.rate_block = QWidget()
+        rate_layout = QVBoxLayout(self.rate_block)
+        rate_layout.setContentsMargins(0, 0, 0, 0)
+        rate_layout.setSpacing(6)
+        rate_layout.addLayout(_row("Video bitrate", self.bitrate_box))
+        rate_layout.addLayout(_row("File size", self.size_box))
+        rate_layout.addWidget(self.rate_note)
+        self.add(self.rate_block)
 
         self.height_box = QComboBox()
         for label, value in self.HEIGHTS:
@@ -572,6 +606,7 @@ class ExportPanel(ModuleCard):
         return family.suffix == ".mkv" or (family.suffix == ".mp4" and self._s.container == "mkv")
 
     def _show_track_rows(self) -> None:
+        self._sync_rates()                                        # the sound and the container decide how much of the file is picture
         many_audio = len(self._audio_tracks) > 1
         for row, visible in ((self.audio_track_row, many_audio), (self.subtitle_row, bool(self._subtitle_tracks))):
             for i in range(row.count()):
@@ -654,7 +689,88 @@ class ExportPanel(ModuleCard):
 
     def _set(self, attr: str, value) -> None:
         setattr(self._s, attr, value)
+        self._sync_rates()
         self.changed.emit()
+
+    # -- quality, bitrate and file size: three views of one choice ---------------------------------------------
+
+    def set_rate_context(self, provider) -> None:
+        """``provider()`` returns ((width, height), fps, seconds, audio bits/s) for what would be converted now, or None."""
+        self._rate_context = provider
+        self._sync_rates()
+
+    def refresh_rates(self) -> None:
+        """What is being converted changed (file, 3D layout, size, range, sound): recompute the other two values."""
+        self._sync_rates()
+
+    def _quality_moved(self, value: float) -> None:
+        self._s.quality = int(value)
+        self._s.rate_mode = "quality"
+        self._sync_rates()
+        self.changed.emit()
+
+    def _bitrate_typed(self, kbps: int) -> None:
+        if self._syncing:
+            return
+        self._s.rate_mode, self._s.video_kbps = "bitrate", int(kbps)
+        self._sync_rates()
+        self.changed.emit()
+
+    def _size_typed(self, megabytes: int) -> None:
+        if self._syncing:
+            return
+        self._s.rate_mode, self._s.target_mb = "size", float(megabytes)
+        self._sync_rates()
+        self.changed.emit()
+
+    def _sync_rates(self) -> None:
+        if not hasattr(self, "rate_block"):
+            return
+        fam = encoders.FAMILIES_BY_KEY[self.family_box.currentData()]
+        self.rate_block.setVisible(fam.uses_quality)
+        context = self._rate_context() if self._rate_context else None
+        for box in (self.bitrate_box, self.size_box):
+            box.setEnabled(context is not None)
+        if context is None:
+            self.rate_note.setText("Open a video to see the bitrate and file size this will make.")
+            return
+        size, fps, seconds, audio = context
+        mode = self._s.rate_mode
+        if mode == "bitrate":
+            bps = max(ratecontrol.MIN_VIDEO_BPS, self._s.video_kbps * 1000)
+        elif mode == "size" and self._s.target_mb > 0:
+            bps = ratecontrol.video_bps_for_size(self._s.target_mb * 1e6, audio, seconds)
+        else:
+            mode = "quality"
+            bps = ratecontrol.bitrate_for_quality(size, fps, self._s.quality, fam.key)
+        quality = self._s.quality if mode == "quality" else ratecontrol.quality_for_bitrate(bps, size, fps, fam.key)
+        megabytes = ratecontrol.size_bytes(bps, audio, seconds) / 1e6
+        self._syncing = True
+        try:
+            if mode != "quality":
+                self.quality.set_value(quality)                # the slider shows what the typed number comes to
+            self.bitrate_box.setValue(max(self.bitrate_box.minimum(), round(bps / 1000)))
+            self.size_box.setValue(max(1, round(self._s.target_mb if mode == "size" else megabytes)))
+        finally:
+            self._syncing = False
+        mbps, how = bps / 1e6, ratecontrol.describe_size(megabytes)
+        if mode == "quality":
+            text = (f"Constant quality: about {mbps:.1f} Mb/s and {how} for this part (an estimate - it depends on the picture). "
+                    "Type a bitrate or a file size to aim at it exactly.")
+        elif mode == "bitrate":
+            text = f"Aiming at {mbps:.1f} Mb/s: the file will be about {how}. Quality {quality} is the nearest slider position."
+        else:
+            text = (f"Aiming at {ratecontrol.describe_size(self._s.target_mb)}: {mbps:.1f} Mb/s of video"
+                    + (f" and {audio / 1000:.0f} kb/s of sound" if audio else "") + f". Quality {quality} is the nearest slider position.")
+        if mode != "quality" and fam.key == "vp9":
+            text += " VP9 aims loosely: the real size can run well over. H.265 or H.264 land much closer."
+        elif mode != "quality" and self._s.encoder not in ("auto",) and encoders.is_hardware(self._s.encoder):
+            text += " Hardware encoders can land up to about 10% off."
+        if mode != "quality" and quality == 0:
+            text += " That is below the slider's lowest quality: expect a rough picture."
+        elif mode != "quality" and quality == 100:
+            text += " That is above the slider's top quality: more than the picture needs."
+        self.rate_note.setText(text)
 
     def _family(self) -> None:
         key = self.family_box.currentData()
@@ -662,6 +778,7 @@ class ExportPanel(ModuleCard):
         self._s.family = key
         self.family_note.setText(fam.note)
         self.quality.setVisible(fam.uses_quality)
+        self._sync_rates()
         self.profile_box.blockSignals(True)
         self.profile_box.clear()
         for i, p in enumerate(fam.profiles):

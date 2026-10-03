@@ -15,7 +15,7 @@ from pathlib import Path
 import numpy as np
 from PySide6.QtCore import QObject, QUrl, Signal
 
-from .. import hdr, video
+from .. import bars, hdr, video
 from ..player import Clock, FrameFeeder
 from . import geometry as geo
 
@@ -76,6 +76,10 @@ class VRMedia(QObject):
         self._latest: np.ndarray | None = None
         self._latest_ms = 0
         self._taken = True
+        self.trim_bars = True                           # show only the real picture of a film that has black bars burned into its frame
+        self._detected = bars.NONE                      # what the scan of the open file found (None until it finishes)
+        self._scan_token = 0
+        self._bar_cache: dict[tuple, bars.Crop] = {}
 
     # -- facts about what is open ------------------------------------------------------------------
 
@@ -96,9 +100,15 @@ class VRMedia(QObject):
         return int(self._clock.now())
 
     @property
+    def crop(self) -> bars.Crop:
+        """The black bars to leave out of one eye's picture (nothing, when trimming is off or the scan has not finished)."""
+        return self._detected if self.trim_bars else bars.NONE
+
+    @property
     def aspect(self) -> float:
-        """The screen's shape: that of one eye's picture."""
-        return geo.eye_aspect(self.layout, self.info.width, self.info.height) if self.info else 16 / 9
+        """The shape of the picture to put on the screen: one eye's picture, without its black bars."""
+        base = geo.eye_aspect(self.layout, self.info.width, self.info.height) if self.info else 16 / 9
+        return base * self.crop.aspect_factor
 
     # -- opening ----------------------------------------------------------------------------------
 
@@ -121,10 +131,34 @@ class VRMedia(QObject):
         self._feeder = feeder
         feeder.start()
         feeder.seek(0.0, True)                               # the first picture; stay paused
+        self._scan_bars(Path(path), layout)
         self.state_changed.emit(False)
         return True
 
+    def _scan_bars(self, path: Path, layout: str) -> None:
+        """Look for burned-in black bars in the background (a few seconds on a big file); the picture is whole until it is done."""
+        self._scan_token += 1
+        token = self._scan_token
+        self._detected = bars.NONE
+        try:
+            key = (str(path), path.stat().st_mtime_ns, layout)
+        except OSError:
+            return
+        if key in self._bar_cache:
+            self._detected = self._bar_cache[key]
+            return
+
+        def work() -> None:
+            found = bars.detect(path, layout)
+            self._bar_cache[key] = found
+            if token == self._scan_token:                    # still the same film
+                self._detected = found
+
+        threading.Thread(target=work, name="uv3d-bars", daemon=True).start()
+
     def close(self, wait: bool = False) -> None:
+        self._scan_token += 1
+        self._detected = bars.NONE
         feeder, self._feeder = self._feeder, None
         if feeder is not None:
             feeder.shutdown()
