@@ -546,7 +546,8 @@ class VRSession(QObject):
                     hover = button or hover
                     if hand.select_pressed and button:
                         presses.append(button)
-            beams.append((origin, direction, length, BEAM_HIT if (hit or on_menu) else BEAM_IDLE))
+            landed = bool(hit or on_menu)
+            beams.append((origin, direction, length, BEAM_HIT if landed else BEAM_IDLE, landed))     # the last: draw a dot at the tip
             if hand.select_pressed and hit and not on_menu:
                 self._toggle.set()
             if screen.fixed is None:

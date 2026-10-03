@@ -139,3 +139,23 @@ def test_pointer_beams_draw_in_their_colour(gl):
     img = np.frombuffer(GL.glReadPixels(0, 0, W, H, GL.GL_RGB, GL.GL_UNSIGNED_BYTE), np.uint8).reshape(H, W, 3)[::-1]
     yellow = (img[:, :, 0] > 200) & (img[:, :, 1] > 200) & (img[:, :, 2] < 80)
     assert yellow.sum() > 10
+
+
+def test_pointer_rays_are_never_hidden_by_the_room(gl):
+    """A ray behind the screen is still drawn: depth-tested, chair backs and consoles hid pieces of it in the headset
+    (it looked cut in half and shifted). A flat red picture on the screen, a magenta ray passing behind it."""
+    r = gl
+    r.upload(np.full((64, 128, 3), (200, 20, 20), np.uint8))
+    screen = geo.Screen(aspect=16 / 9, distance=3.0, width=3.2, origin=(0.0, 1.6, 0.0))
+    half = np.radians(45)
+    proj = geo.projection_matrix(-half, half, half * H / W, -half * H / W)
+    view = geo.view_matrix((0.0, 1.6, 0.0), (0, 0, 0, 1))
+    GL.glViewport(0, 0, W, H)
+    ray = ((-1.2, 1.6105, -3.4), (1.0, 0.0, 0.0), 2.4, (1.0, 0.0, 1.0, 1.0), True)   # horizontal, 40 cm behind the screen, on a pixel row (the ray is only 4 mm thick)
+    r.draw_eye(view, proj, 0, (0.0, 1.6, 0.0), screen, "", rend.ROOM, (ray,))
+    image = np.frombuffer(GL.glReadPixels(0, 0, W, H, GL.GL_RGB, GL.GL_UNSIGNED_BYTE), np.uint8).reshape(H, W, 3)[::-1]
+    middle = image[H // 2 - 6: H // 2 + 6, W // 2 - 60: W // 2 + 60].astype(int)
+    assert ((middle[..., 2] > 200) & (middle[..., 0] > 200)).any()                    # magenta shows through the screen
+    r.draw_eye(view, proj, 0, (0.0, 1.6, 0.0), screen, "", rend.ROOM, ())
+    clean = np.frombuffer(GL.glReadPixels(0, 0, W, H, GL.GL_RGB, GL.GL_UNSIGNED_BYTE), np.uint8).reshape(H, W, 3)[::-1]
+    assert not ((clean[H // 2 - 6: H // 2 + 6, W // 2 - 60: W // 2 + 60, 2].astype(int) > 200)).any()   # and not without it

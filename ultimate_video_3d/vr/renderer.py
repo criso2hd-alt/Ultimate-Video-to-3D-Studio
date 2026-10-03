@@ -547,11 +547,6 @@ class Renderer:
             GL.glBindVertexArray(self._vao_quad)
             GL.glDrawArrays(GL.GL_TRIANGLES, 0, 6)
 
-        if pointers:
-            GL.glUseProgram(self._flat)
-            GL.glBindVertexArray(self._vao_cube)
-            for origin, direction, length, colour in pointers:
-                self._draw_beam(vp, origin, direction, length, colour)
         if panel is not None and self._panel_texture:
             GL.glUseProgram(self._panel)
             self._m4(self._panel, "u_mvp", vp @ panel)
@@ -568,8 +563,30 @@ class Renderer:
             GL.glEnable(GL.GL_DEPTH_TEST)
             GL.glDepthMask(GL.GL_TRUE)
             GL.glDisable(GL.GL_BLEND)
+        if pointers:
+            # The controllers' rays go last and on top of everything: a ray is a tool, not part of the room. Depth-tested, the
+            # chair backs and the console hid pieces of it (it looked cut in half and shifted), and the menu showed it ghosting
+            # through. A small dot marks where it lands on something it can press.
+            GL.glDisable(GL.GL_DEPTH_TEST)
+            GL.glUseProgram(self._flat)
+            GL.glBindVertexArray(self._vao_cube)
+            for pointer in pointers:
+                origin, direction, length, colour = pointer[:4]
+                self._draw_beam(vp, origin, direction, length, colour)
+                if len(pointer) > 4 and pointer[4]:
+                    d = np.asarray(direction, np.float64)
+                    self._draw_dot(vp, np.asarray(origin, np.float64) + d / (np.linalg.norm(d) or 1.0) * length, colour)
+            GL.glEnable(GL.GL_DEPTH_TEST)
         GL.glBindVertexArray(0)
         GL.glUseProgram(0)
+
+    def _draw_dot(self, vp: np.ndarray, position, colour, size: float = 0.014) -> None:
+        """A small cube where a pointer ray lands."""
+        m = np.diag([size, size, size, 1.0])
+        m[:3, 3] = position
+        self._m4(self._flat, "u_mvp", vp @ m)
+        GL.glUniform4f(GL.glGetUniformLocation(self._flat, "u_colour"), *colour)
+        GL.glDrawArrays(GL.GL_TRIANGLES, 0, self._cube_count)
 
     def _draw_beam(self, vp: np.ndarray, origin, direction, length: float, colour, thickness: float = 0.004) -> None:
         """A thin box from ``origin`` along ``direction``: the controller's pointing ray."""

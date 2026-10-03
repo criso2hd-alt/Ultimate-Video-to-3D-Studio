@@ -292,6 +292,15 @@ click never also toggles play. `Menu.press` returns action tuples; `session._app
 (on Play in VR, after a conversion, and on every tab change). The Play in VR button is always shown and fades out, with the
 reason as its tooltip, when `vr.unavailable_reason()` is non-empty; a runtime with no headset behind it (XR
 FORM_FACTOR_UNAVAILABLE) becomes "Please connect your VR headset" in a box (`session.friendly_error`, `MainWindow._vr_failed`).
+**Pointer rays are drawn last, on top, without depth test** (`renderer.draw_eye`, 5-element tuples (origin, direction, length,
+colour, landed) with a dot at the tip when `landed`). Depth-tested they were hidden piecemeal by chair backs and the console and
+looked "cut in half and shifted" in the headset; the menu panel also showed them ghosting through it. Reproduce without a
+headset by drawing a lap-height ray at the menu offscreen (the repro lives in the session notes; the test is
+`test_pointer_rays_are_never_hidden_by_the_room`).
+`scripts/blender/find_bake_problems.py` lists (and selects in Edit Mode) faces that cannot bake: pointing into solid (INSIDE) or sunk
+under 3 cm into another surface (BURIED). The owner's first bake had a black console bin and wall-base framing for exactly that
+reason; the logo (`icon_transparent`, PNG alpha over a `Lightbox` face) baked opaque black because a Cycles bake does not composite
+a transparent surface over what is behind it - plan: bake only the lightbox face and ship the logo as an alpha decal.
 Not yet checked: SteamVR and Virtual Desktop runtimes (`XR_RUNTIME_JSON=<json>` selects one for a single process
 without touching the system setting).
 The runtime prints a lot of its own log to stdout: never parse stdout for results.
