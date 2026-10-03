@@ -548,3 +548,50 @@ def test_every_main_page_row_fits_with_the_sound_row_and_a_note(qapp):
         assert 0 <= a.left() and a.right() <= menumod.W and 0 <= a.top() and a.bottom() <= menumod.H, a_id
         for b_id, b in rects[i + 1:]:
             assert not a.intersects(b), (a_id, b_id)
+
+
+def test_the_beam_row_appears_only_in_a_room_with_a_projector_and_steps_through_the_brightness_levels(qapp):
+    menu = ready()
+    menu.image()
+    assert not any(b.id.startswith("beam:") for b in menu._buttons)            # a room without a projector has nothing to switch
+    menu.set_beam(has=True)
+    assert click(menu, "beam:toggle") == ("beam", False, 1.0)                  # off ...
+    assert click(menu, "beam:toggle") == ("beam", True, 1.0)                   # ... and on again
+    assert click(menu, "beam:+") == ("beam", True, 1.5)
+    assert click(menu, "beam:+") == ("beam", True, 2.0)
+    assert click(menu, "beam:+") == ("beam", True, 2.0)                        # stops at the top
+    for expected in (1.5, 1.0, 0.75, 0.5, 0.25, 0.25):
+        assert click(menu, "beam:-")[2] == expected
+    menu.set_beam(on=False)
+    assert click(menu, "beam:+")[1] is True                                    # changing the brightness of a switched-off beam turns it on
+    menu.set_beam(level=0.6)
+    assert menu.beam_level == 0.5                                              # a saved value between the steps lands on the nearest one
+
+
+def test_every_main_page_row_fits_with_the_beam_row_too(qapp):
+    menu = ready()
+    menu.set_audio("Automatic: Headphones (Oculus Virtual Audio Device)")
+    menu.set_beam(has=True)
+    menu.set_note("Screenshot saved in your Pictures folder.")
+    menu.image()
+    rects = [(b.id, b.rect) for b in menu._buttons]
+    for i, (a_id, a) in enumerate(rects):
+        assert 0 <= a.left() and a.right() <= menumod.W and 0 <= a.top() and a.bottom() <= menumod.H, a_id
+        for b_id, b in rects[i + 1:]:
+            assert not a.intersects(b), (a_id, b_id)
+
+
+def test_the_beam_choice_made_in_the_headset_reaches_the_window_and_the_picture(session):
+    seen = []
+    session.menu_action.connect(seen.append)
+    session.menu.set_beam(has=True)
+    session._controls({"left": Hand(valid=True, menu_pressed=True)}, 0.01)
+    for button in ("beam:toggle", "beam:+"):
+        hand = aimed_at(world_point(session, button))
+        hand.select_pressed = True
+        session._controls({"right": hand}, 0.01)
+        session._controls({"right": Hand(valid=True)}, 0.01)                 # let go between presses
+    assert seen == [("beam", False, 1.0), ("beam", True, 1.5)]
+    assert session.beam_on is True and session.beam_level == 1.5
+    session.set_beam(False, 0.5)                                               # and the app can set it too (Settings)
+    assert (session.menu.beam_on, session.menu.beam_level) == (False, 0.5)

@@ -91,6 +91,7 @@ class Room:
     screen: ScreenQuad | None = None
     glow: GlowQuad | None = None             # the plane on the screen wall (named exactly BiasGlow)
     glows: list[GlowQuad] = field(default_factory=list)      # every BiasGlow* plane: that one, plus floor, top and sides if the owner made them
+    projector_lens: np.ndarray | None = None     # where the beam starts (the Projector_Lens empty), if the room has a projector
     default_seat: str = ""
     light_level_paused: float = 0.6
     screen_emission: float = 8.0
@@ -206,6 +207,9 @@ def load(folder: str | Path) -> Room:
     room.seats = sorted(seats, key=lambda s: s.name)
     spawn = scene.node("Spawn")
     room.spawn = _seat_of(spawn) if spawn is not None else None
+    lens = scene.node("Projector_Lens")
+    if lens is not None:
+        room.projector_lens = np.asarray(lens.position, np.float64).copy()
     if room.screen is None:
         raise RoomError("the room has no object named Screen")
     if not room.groups:

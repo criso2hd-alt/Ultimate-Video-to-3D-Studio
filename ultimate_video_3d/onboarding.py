@@ -77,8 +77,8 @@ class WelcomeDialog(QDialog):
         ("See it before you convert", "A live 3D preview with views that prove the depth, no glasses needed."),
         ("Grade it too", "Professional colour correction and .cube LUTs, with live scopes."),
         ("All the codecs", "H.264, H.265, AV1, VP9, ProRes, DNxHR, FFV1 - 10-bit HDR stays HDR."),
-        ("Your discs and your library", "Copy your own DVDs and Blu-rays, pause a long conversion and resume it later, "
-                                        "keep every result in the Library."),
+        ("Your discs and your library", "Copy your own DVDs and Blu-rays, open a folder of rips and pick the audio and subtitles, "
+                                        "pause a long conversion and resume it later, keep every result in the Library."),
         ("Watch it in VR", "Play any video on a big screen in a home theatre in your OpenXR headset."),
     )
 

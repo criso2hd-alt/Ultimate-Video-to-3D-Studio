@@ -714,12 +714,30 @@ class SettingsPage(QWidget):
         self.vr_auto.setToolTip("While the Library is open the app looks for a headset every few seconds and connects to it "
                                 "by itself, so you can put the headset on without touching the keyboard or the mouse. "
                                 "Leaving VR from the headset's menu pauses this until you ask for VR again.")
+        self.vr_beam = QCheckBox("Show the projector's light beam in the room")
+        self.vr_beam.setChecked(settings.vr_beam)
+        self.vr_beam.setToolTip("The faint beam of light from the ceiling projector to the screen, while a film plays with the lights "
+                                "down. The projector's lens keeps glowing either way. You can also change this in the headset's menu.")
+        self.vr_beam_box = QComboBox()
+        for level in (0.25, 0.5, 0.75, 1.0, 1.5, 2.0):
+            self.vr_beam_box.addItem(f"{round(level * 100)}%", level)
+        self.vr_beam_box.setCurrentIndex(max(0, self.vr_beam_box.findData(min((0.25, 0.5, 0.75, 1.0, 1.5, 2.0),
+                                                                                key=lambda v: abs(v - settings.vr_beam_level)))))
+        self.vr_beam_box.setToolTip("How bright the beam is: 100% is the normal strength.")
+        self.vr_beam_box.setMinimumWidth(110)
+        beam_row = QHBoxLayout()
+        beam_row.addWidget(QLabel("Beam brightness"))
+        beam_row.addStretch(1)
+        beam_row.addWidget(self.vr_beam_box)
         self.vr_room_button = QPushButton("Choose a VR room folder…")
         self.vr_room_button.setObjectName("secondary")
         self.vr_room_button.setToolTip("A folder with room.glb and room.json (a baked home theatre).")
         self.vr_room_clear = QPushButton("Use the plain room")
         self.vr_room_clear.setObjectName("secondary")
-        for widget in (self.vr_status, self.vr_auto, self.vr_room_label, self.vr_room_button, self.vr_room_clear):
+        for widget in (self.vr_status, self.vr_auto, self.vr_beam):
+            vr_card.add(widget)
+        vr_card.add_layout(beam_row)
+        for widget in (self.vr_room_label, self.vr_room_button, self.vr_room_clear):
             vr_card.add(widget)
         cards.append(vr_card)
 
@@ -1160,6 +1178,10 @@ class MainWindow(QMainWindow):
         sp.vr_auto.toggled.connect(self._vr_auto_changed)
         self.vr.audio_choice = self.settings.vr_audio_device
         self.vr.audio_choice_changed.connect(self._vr_audio_chosen)
+        self.vr.beam_on, self.vr.beam_level = self.settings.vr_beam, self.settings.vr_beam_level
+        self.vr.beam_changed.connect(self._vr_beam_from_headset)
+        sp.vr_beam.toggled.connect(self._vr_beam_from_settings)
+        sp.vr_beam_box.currentIndexChanged.connect(self._vr_beam_from_settings)
         sp.vr_room_button.clicked.connect(self._choose_vr_room)
         sp.vr_room_clear.clicked.connect(self._clear_vr_room)
         self._refresh_vr_settings()
@@ -1952,6 +1974,25 @@ class MainWindow(QMainWindow):
         self.settings.vr_auto_connect = on
         self.settings.save(paths.settings_path())
         self._update_vr_watch()
+
+    def _vr_beam_from_settings(self, *_) -> None:
+        sp = self.settings_page
+        self.settings.vr_beam = sp.vr_beam.isChecked()
+        self.settings.vr_beam_level = float(sp.vr_beam_box.currentData() or 1.0)
+        self.settings.save(paths.settings_path())
+        self.vr.set_beam(self.settings.vr_beam, self.settings.vr_beam_level)
+
+    def _vr_beam_from_headset(self, on: bool, level: float) -> None:
+        """The beam was switched or dimmed in the headset's menu: remember it and show it in Settings too."""
+        self.settings.vr_beam, self.settings.vr_beam_level = on, level
+        self.settings.save(paths.settings_path())
+        sp = self.settings_page
+        for widget in (sp.vr_beam, sp.vr_beam_box):
+            widget.blockSignals(True)
+        sp.vr_beam.setChecked(on)
+        sp.vr_beam_box.setCurrentIndex(max(0, sp.vr_beam_box.findData(level)))
+        for widget in (sp.vr_beam, sp.vr_beam_box):
+            widget.blockSignals(False)
 
     def _vr_audio_chosen(self, choice: str) -> None:
         self.settings.vr_audio_device = choice            # "" = automatic

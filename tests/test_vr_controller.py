@@ -74,6 +74,9 @@ class FakeSession(QObject):
     def set_audio_label(self, label):
         self.audio_label = label
 
+    def set_beam(self, on, level):
+        self.beam = (on, level)
+
     def start(self):
         self.running = True
 
@@ -298,3 +301,15 @@ def test_a_saved_choice_wins_over_automatic_when_that_device_is_still_there(qapp
     assert ("device", "Acer XR382CQK (NVIDIA High Definition Audio)") in vr.media.calls
     vr.audio_choice = "A device that was unplugged"
     assert vr.audio_device().description() == "Headphones (Oculus Virtual Audio Device)"          # falls back to automatic
+
+
+def test_the_projector_beam_setting_reaches_the_headset_and_the_headsets_choice_comes_back(vr):
+    vr.beam_on, vr.beam_level = False, 0.5                                     # what the app's settings said before VR started
+    vr.start()
+    assert vr.session.beam == (False, 0.5)
+    vr.set_beam(True, 1.5)
+    assert vr.session.beam == (True, 1.5)
+    heard = []
+    vr.beam_changed.connect(lambda on, level: heard.append((on, level)))
+    vr._on_menu_action(("beam", False, 0.25))                                  # the person switched it in the headset
+    assert heard == [(False, 0.25)] and (vr.beam_on, vr.beam_level) == (False, 0.25)

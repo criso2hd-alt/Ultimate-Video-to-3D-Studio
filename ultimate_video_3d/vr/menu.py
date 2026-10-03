@@ -10,7 +10,7 @@ lights, seat, volume, exit), ``videos`` (the Library, three by two thumbnails a 
 Pressing a button returns an *action* tuple for whoever owns the headset to carry out, or None when the press was only
 about the menu itself (changing page, paging through videos):
     ("play",)  ("video", Tile)  ("lights", "auto"|"on"|"off")  ("volume", 0..1)  ("seat", +1|-1)  ("recentre",)
-    ("exit",)  ("close",)  ("screenshot",)  ("audio", +1|-1)
+    ("exit",)  ("close",)  ("screenshot",)  ("audio", +1|-1)  ("beam", on, level)
 """
 
 from __future__ import annotations
@@ -50,6 +50,14 @@ class _Button:
     rect: QRectF
 
 
+#: The brightness steps of the projector beam (1.0 = the normal strength); the < > buttons and the app's Settings move along these.
+BEAM_LEVELS = (0.25, 0.5, 0.75, 1.0, 1.5, 2.0)
+
+
+def _nearest_level(level: float) -> float:
+    return min(BEAM_LEVELS, key=lambda v: abs(v - float(level)))
+
+
 class Menu:
     def __init__(self) -> None:
         self.open = False
@@ -67,6 +75,9 @@ class Menu:
         self.tiles: list[Tile] = []
         self.video_page = 0
         self.help_left = 0.0                # seconds until the help card closes itself; 0 = it stays
+        self.has_beam = False               # the room has a projector: show the Beam row
+        self.beam_on = True
+        self.beam_level = 1.0
         self.audio_label: str | None = None  # where the sound goes, e.g. "Automatic: Headphones (Oculus Virtual Audio Device)"; None: no row
         self.note = ""                      # a line under the main page's buttons ("Screenshot saved...")
         self.note_left = 0.0
@@ -89,6 +100,14 @@ class Menu:
 
     def toggle(self) -> None:
         self.close() if self.open else self.show("main")
+
+    def set_beam(self, has: bool | None = None, on: bool | None = None, level: float | None = None) -> None:
+        """The projector beam row: whether the room has a projector, whether its beam is on, and how bright (see BEAM_LEVELS)."""
+        values = (self.has_beam if has is None else has, self.beam_on if on is None else on,
+                  self.beam_level if level is None else _nearest_level(level))
+        if values != (self.has_beam, self.beam_on, self.beam_level):
+            self.has_beam, self.beam_on, self.beam_level = values
+            self._dirty = True
 
     def set_audio(self, label: str | None) -> None:
         if label != self.audio_label:
@@ -161,6 +180,13 @@ class Menu:
             return ("seat", int(button[5:]))
         if button in ("audio:-1", "audio:1"):
             return ("audio", int(button[6:]))
+        if button == "beam:toggle":
+            self.beam_on, self._dirty = not self.beam_on, True
+            return ("beam", self.beam_on, self.beam_level)
+        if button in ("beam:-", "beam:+"):
+            at = BEAM_LEVELS.index(self.beam_level) + (1 if button == "beam:+" else -1)
+            self.beam_level, self.beam_on, self._dirty = BEAM_LEVELS[min(len(BEAM_LEVELS) - 1, max(0, at))], True, True
+            return ("beam", self.beam_on, self.beam_level)
         if button in ("vol:-", "vol:+"):
             self.volume = min(1.0, max(0.0, round(self.volume + (0.1 if button == "vol:+" else -0.1), 2)))
             self._dirty = True
@@ -252,7 +278,7 @@ class Menu:
         self._button(p, "play", QRectF(48, top, 380, 100), "Pause" if self.playing else "Play", style="primary", pixels=44)
         self._button(p, "page:videos", QRectF(450, top, 380, 100), "Videos", pixels=44)
         self._button(p, "page:help", QRectF(852, top, 380, 100), "Help", pixels=44)
-        y, pitch, height = 262, 88, 72
+        y, pitch, height = 252, 74, 62
         if self.has_lights:
             self._text(p, QRectF(48, y, 200, height), "Lights", 34, INK, bold=True)
             for i, (mode, label) in enumerate(LIGHT_MODES):
@@ -276,6 +302,16 @@ class Menu:
             self._button(p, "audio:-1", QRectF(260, y, 90, height), "<", pixels=38)
             self._text(p, QRectF(360, y, 730, height), self.audio_label, 26, INK, align=Qt.AlignmentFlag.AlignCenter)
             self._button(p, "audio:1", QRectF(1100, y, 90, height), ">", pixels=38)
+            y += pitch
+        if self.has_beam:
+            self._text(p, QRectF(48, y, 200, height), "Beam", 34, INK, bold=True)
+            self._button(p, "beam:toggle", QRectF(260, y, 150, height), "On" if self.beam_on else "Off",
+                         style="selected" if self.beam_on else "normal", pixels=32)
+            self._button(p, "beam:-", QRectF(430, y, 90, height), "-", pixels=42)
+            self._text(p, QRectF(530, y, 170, height), f"{round(self.beam_level * 100)}%", 34, INK if self.beam_on else FAINT,
+                       align=Qt.AlignmentFlag.AlignCenter)
+            self._button(p, "beam:+", QRectF(710, y, 90, height), "+", pixels=42)
+            self._text(p, QRectF(830, y, 400, height), "The projector's light in the air. The lens always glows.", 20, FAINT, wrap=True)
         if self.note:
             self._text(p, QRectF(48, 612, W - 96, 40), self.note, 24, SIGNAL)
         self._button(p, "recentre", QRectF(48, 668, 380, 80), "Reset view", pixels=30)
@@ -317,7 +353,7 @@ class Menu:
         self._header(p, "How to use the headset", "Point a controller at a button and pull the trigger.")
         rows = (
             ("Trigger on the screen,  or  A / X", "Play and pause"),
-            ("Left menu button,  or  B / Y", "Open this menu: videos, lights, seat, volume"),
+            ("Left menu button,  or  B / Y", "Open this menu: videos, lights, seat, volume, beam"),
             ("Left stick, left or right", "Back or forward 10 seconds"),
             ("Right stick, any direction", "Go to the seat that way"),
             ("Press the right stick down", "Reset the view: face the screen"),

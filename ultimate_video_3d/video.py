@@ -134,6 +134,7 @@ _SUBTITLE_FORMATS = {
 }
 #: Pictures, not text: they cannot be turned into another subtitle format, only carried across in a Matroska (MKV) file.
 PICTURE_SUBTITLES = frozenset({"hdmv_pgs_subtitle", "dvd_subtitle", "dvb_subtitle", "xsub"})
+FEW_LINES = 30           # a subtitle track with this few lines or fewer is the "forced" kind, not a full translation
 _DISPOSITION_DEFAULT, _DISPOSITION_COMMENT, _DISPOSITION_FORCED, _DISPOSITION_HEARING = 1, 8, 64, 128
 
 
@@ -158,6 +159,7 @@ class Track:
     forced: bool = False
     commentary: bool = False
     hearing_impaired: bool = False
+    lines: int = 0             # subtitles only, when the ripper recorded it (MakeMKV): how many pictures / lines the track holds
 
     @property
     def language_name(self) -> str:
@@ -188,13 +190,24 @@ class Track:
     def is_picture(self) -> bool:
         return self.kind == "subtitle" and self.codec in PICTURE_SUBTITLES
 
+    def _title_repeats_label(self, parts: list[str]) -> bool:
+        """Rippers title tracks "Surround 5.1" / "Stereo" - which the label already says; showing it again is noise."""
+        title = self.title.strip().lower()
+        if title in {p.lower() for p in parts}:
+            return True
+        words = {"surround", "stereo", "mono", "dolby", "digital", "dts", "hd", "ma", "master", "audio", "lossless", "pcm", "truehd", "atmos"}
+        rest = [w for w in title.replace("-", " ").replace(".", " ").split() if w not in words and not w.isdigit()]
+        return not rest
+
     def label(self) -> str:
         """One line to pick it by, e.g.  English · DTS-HD MA 7.1 · default  or  French · Blu-ray picture (PGS) · forced."""
         parts = [self.language_name or "Unknown language", self.format_name]
         if self.kind == "audio":
             parts[1] = f"{self.format_name} {_channel_text(self.channels)}".strip()
-        if self.title and self.title.lower() not in {p.lower() for p in parts}:
+        if self.title and not self._title_repeats_label(parts):
             parts.append(self.title)
+        if self.kind == "subtitle" and 0 < self.lines <= FEW_LINES and not self.forced:
+            parts.append(f"only {self.lines} lines - probably forced")          # discs keep the foreign-speech-only track beside the full one
         for flag, text in ((self.commentary, "commentary"), (self.forced, "forced"), (self.hearing_impaired, "for the hard of hearing"),
                            (self.default, "default")):
             if flag:
@@ -216,8 +229,21 @@ def _track_of(stream) -> Track:
     except Exception:  # noqa: BLE001
         profile = ""
     commentary = bool(disposition & _DISPOSITION_COMMENT) or "commentary" in title.lower()
+    # ctx.name is FFmpeg's *decoder* name ("dca", "pgssub"); the codec's own name ("dts", "hdmv_pgs_subtitle") is what everything else uses.
+    try:
+        codec = str(ctx.codec.canonical_name or ctx.name or "")
+    except Exception:  # noqa: BLE001 - an older build: fall back to the decoder name
+        codec = str(ctx.name or "")
+    lines = 0
+    if stream.type != "audio":
+        for key, value in meta.items():
+            if key.upper().startswith("NUMBER_OF_FRAMES"):         # MakeMKV writes this tag per track
+                try:
+                    lines = int(value)
+                except ValueError:
+                    pass
     return Track(
-        kind="audio" if stream.type == "audio" else "subtitle", index=stream.index, codec=ctx.name or "",
+        kind="audio" if stream.type == "audio" else "subtitle", index=stream.index, codec=codec, lines=lines,
         language=str(meta.get("language") or meta.get("LANGUAGE") or ""), title=title,
         channels=int(getattr(ctx, "channels", 0) or 0), sample_rate=int(getattr(ctx, "sample_rate", 0) or 0),
         bit_rate=int(getattr(ctx, "bit_rate", 0) or 0), profile=profile,

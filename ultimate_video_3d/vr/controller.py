@@ -51,6 +51,7 @@ class VRController(QObject):
     seats_changed = Signal(list)            # [(name, label)] once a room is loaded
     failed = Signal(str)
     audio_choice_changed = Signal(str)      # the person chose a sound device in the headset ("" = automatic): save it
+    beam_changed = Signal(bool, float)      # the person switched the projector beam or changed its brightness in the headset: save it
     _probed = Signal(bool)                  # a headset probe finished (queued onto the UI thread)
 
     def __init__(self, parent: QObject | None = None, session_factory=None, media_factory=None, probe=None,
@@ -60,6 +61,7 @@ class VRController(QObject):
         self._probe_fn = probe or headset_present
         self._audio_outputs_fn = audio_outputs or qt_audio_outputs
         self.audio_choice = ""               # "" = automatic (the headset's device if there is one)
+        self.beam_on, self.beam_level = True, 1.0       # the projector's beam in the room (the app's settings fill these in)
         self._watching = self._paused = self._probing = False
         self._timer = QTimer(self)
         self._timer.setInterval(WATCH_SECONDS * 1000)
@@ -119,6 +121,7 @@ class VRController(QObject):
         if hasattr(self.media, "failed"):
             self.media.failed.connect(self.notice)
         self.apply_audio()
+        self.apply_beam()
 
     def use_room(self, folder: str | Path | None) -> bool:
         """Choose the room to sit in (None for the plain stand-in). Returns False, with a notice, if it cannot be loaded."""
@@ -214,6 +217,9 @@ class VRController(QObject):
                 self.media.set_volume(self._volume)
         elif kind == "audio":
             self.cycle_audio(int(action[1]))
+        elif kind == "beam":
+            self.beam_on, self.beam_level = bool(action[1]), float(action[2])
+            self.beam_changed.emit(self.beam_on, self.beam_level)
         elif kind == "exit":
             self.stop()
         elif kind == "screenshot":
@@ -286,6 +292,15 @@ class VRController(QObject):
             self.media.set_audio_device(device)
         if self.session is not None and hasattr(self.session, "set_audio_label"):
             self.session.set_audio_label(self.audio_label())
+
+    def apply_beam(self) -> None:
+        if self.session is not None and hasattr(self.session, "set_beam"):
+            self.session.set_beam(self.beam_on, self.beam_level)
+
+    def set_beam(self, on: bool, level: float) -> None:
+        """Switch the projector's beam on or off and set its brightness (the lens keeps glowing); the headset follows at once."""
+        self.beam_on, self.beam_level = bool(on), float(level)
+        self.apply_beam()
 
     def cycle_audio(self, direction: int) -> None:
         """The menu's Sound row: automatic, then each output device in turn."""

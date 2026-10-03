@@ -165,7 +165,7 @@ void main() {
 }
 """
 
-# The halo behind the screen, like a TV's LED backlight: the colour of the picture's nearest edge, fading with distance.
+# The halo around the screen: the picture mirrored outward over the wall, floor, ceiling and sides, blurred more the farther away.
 _GLOW_VS = """#version 330 core
 layout(location = 0) in vec3 p;
 uniform mat4 u_vp;
@@ -183,10 +183,10 @@ uniform vec3 u_right;
 uniform vec3 u_up;
 uniform vec3 u_forward;
 uniform vec2 u_half;
-uniform vec3 u_top;                             // the picture's edge colours (display-encoded)
-uniform vec3 u_bottom;
-uniform vec3 u_left;
-uniform vec3 u_right_colour;
+uniform vec2 u_pic;                             // the picture's size as a fraction of the screen's (a wide film leaves black bars)
+uniform sampler2D u_tex;                        // the picture itself
+uniform vec4 u_rect;
+uniform float u_gain;
 uniform float u_strength;                       // overall, and for this plane (floor and side planes are weaker)
 uniform vec3 u_reach;                           // falloff per metre, and where the fade-out starts and ends (metres)
 out vec4 colour;
@@ -197,14 +197,119 @@ void main() {
     float x = dot(d, u_right), y = dot(d, u_up), z = max(dot(d, u_forward), 0.0);
     float ox = max(abs(x) - u_half.x, 0.0), oy = max(abs(y) - u_half.y, 0.0);
     float dist = length(vec3(ox, oy, z));
-    float wt = max(y - u_half.y, 0.0), wb = max(-y - u_half.y, 0.0), wl = max(-x - u_half.x, 0.0), wr = max(x - u_half.x, 0.0);
-    float total = wt + wb + wl + wr;
-    vec3 mean = (to_linear(u_top) + to_linear(u_bottom) + to_linear(u_left) + to_linear(u_right_colour)) * 0.25;
-    vec3 near = total > 1e-4 ? (to_linear(u_top) * wt + to_linear(u_bottom) * wb + to_linear(u_left) * wl
-                                + to_linear(u_right_colour) * wr) / total : mean;
+    // What the wall shows here is the picture itself, mirrored outward on every side (left, right, above, below and the four
+    // corners - the picture flipped over its edges) and then blurred, more the farther from the screen. So the spill of light keeps
+    // the shapes and colours of what is at the edge, but nothing is stretched sideways, and it dissolves with distance.
+    vec2 q = vec2(x, y) / (u_half * u_pic);                                 // -1..1 across the picture, beyond it outside
+    vec2 t = vec2(q.x * 0.5 + 0.5, 0.5 - q.y * 0.5);
+    t = 1.0 - abs(1.0 - mod(t, 2.0));                                       // reflect at the picture's edges, over and over
+    float lod = 7.0 + 1.2 * dist;                                           // so blurred that only a mush of colour is left
+    float spread = 0.10 + 0.10 * dist;
+    vec3 sum = vec3(0.0);
+    for (int j = -1; j <= 1; j++) {
+        for (int i = -1; i <= 1; i++) {
+            vec2 tap = 1.0 - abs(1.0 - mod(t + vec2(float(i), float(j)) * spread + 2.0, 2.0));
+            sum += to_linear(textureLod(u_tex, mix(u_rect.xy, u_rect.zw, tap), lod).rgb * u_gain);
+        }
+    }
+    vec3 near = sum / 9.0;
     // a soft halo that has faded out well before the plane's own edge, so no rectangle shows
     float glow = exp(-dist * u_reach.x) * smoothstep(0.0, 0.05, dist) * (1.0 - smoothstep(u_reach.y, u_reach.z, dist));
-    colour = vec4(to_display(near * glow * u_strength), 1.0);               // added to what is already there
+    // Not added on top as a flat wash: it multiplies what the wall already shows, so the plaster and its shading stay visible
+    // through the glow, which is what makes it sit in the wall instead of on it.
+    colour = vec4(to_display(near) * glow * u_strength, 1.0);
+}
+"""
+
+# The projector's light in the air of the room, seen from outside it: the beam is a pyramid from the lens to the picture's four
+# corners. Only its far faces are drawn (front faces culled), and each pixel works out for itself how much beam its eye ray
+# crosses - a ray against five planes - and adds up a little haze at eight points along it. Brighter near the lens, soft at the
+# sides, tinted by the part of the picture that point is aiming at, and drifting slowly like dust in the light.
+_BEAM_FS = "#version 330 core\n" + _COMMON + """
+in vec3 v_world;
+uniform vec3 u_eye;
+uniform vec3 u_lens;
+uniform vec4 u_planes[5];                       // outward normal + offset of the beam's four sides and its end
+uniform mat4 u_pic_inv;                         // world -> the picture's unit quad
+uniform sampler2D u_tex;
+uniform vec4 u_rect;
+uniform float u_gain;
+uniform float u_strength;
+out vec4 colour;
+
+float h3(vec3 p) { return fract(sin(dot(p, vec3(127.1, 311.7, 74.7))) * 43758.5453); }
+float noise3(vec3 p) {
+    vec3 i = floor(p), f = fract(p);
+    f = f * f * (3.0 - 2.0 * f);
+    return mix(mix(mix(h3(i), h3(i + vec3(1, 0, 0)), f.x), mix(h3(i + vec3(0, 1, 0)), h3(i + vec3(1, 1, 0)), f.x), f.y),
+               mix(mix(h3(i + vec3(0, 0, 1)), h3(i + vec3(1, 0, 1)), f.x), mix(h3(i + vec3(0, 1, 1)), h3(i + vec3(1, 1, 1)), f.x), f.y), f.z);
+}
+
+void main() {
+    vec3 span = v_world - u_eye;
+    float far = length(span);
+    vec3 dir = span / far;
+    float t0 = 0.0, t1 = far;
+    for (int i = 0; i < 5; i++) {
+        float den = dot(u_planes[i].xyz, dir);
+        float num = u_planes[i].w - dot(u_planes[i].xyz, u_eye);
+        if (den > 1e-5) t1 = min(t1, num / den);
+        else if (den < -1e-5) t0 = max(t0, num / den);
+        else if (num < 0.0) discard;
+    }
+    if (t1 <= t0) discard;
+    const int N = 8;
+    float dt = (t1 - t0) / float(N);
+    float jitter = hash(gl_FragCoord.xy);
+    vec3 o = (u_pic_inv * vec4(u_lens, 1.0)).xyz;
+    vec3 sum = vec3(0.0);
+    for (int k = 0; k < N; k++) {
+        vec3 x = u_eye + dir * (t0 + (float(k) + jitter) * dt);
+        float r = length(x - u_lens);
+        float side = 1e9;
+        for (int i = 0; i < 4; i++) side = min(side, u_planes[i].w - dot(u_planes[i].xyz, x));
+        float edge = smoothstep(0.0, 0.09, side / max(r, 0.3));          // soft sides, whatever the width there
+        float density = 1.0 / (1.0 + 0.12 * r * r);                      // the light thins out as it spreads
+        float drift = noise3(x * 0.8 + vec3(0.0, -u_time * 0.04, u_time * 0.03));
+        density *= 0.7 + 0.6 * drift;
+        vec3 q = (u_pic_inv * vec4(x, 1.0)).xyz;
+        vec2 xy = o.xy + (q.xy - o.xy) * (o.z / max(o.z - q.z, 1e-3));    // where the light through here lands on the screen
+        vec2 uv = mix(u_rect.xy, u_rect.zw, vec2(clamp(xy.x, -0.5, 0.5) + 0.5, 0.5 - clamp(xy.y, -0.5, 0.5)));
+        vec3 c = to_linear(textureLod(u_tex, uv, 5.0).rgb * u_gain);
+        float mote = smoothstep(0.86, 0.97, noise3(x * 26.0 + vec3(0.0, -u_time * 0.10, u_time * 0.05)));   // dust in the light
+        sum += c * edge * density * (1.0 + 2.5 * mote) * dt;
+    }
+    colour = vec4(to_display(sum * u_strength), 1.0);                   // added to what is already there
+}
+"""
+
+# The lens itself: a bright point with a halo and a faint horizontal streak, always facing the viewer.
+_LENS_VS = """#version 330 core
+layout(location = 0) in vec2 p;
+uniform mat4 u_vp;
+uniform vec3 u_centre;
+uniform vec3 u_cam_right;
+uniform vec3 u_cam_up;
+out vec2 v_uv;
+void main() {
+    v_uv = p;
+    gl_Position = u_vp * vec4(u_centre + u_cam_right * p.x + u_cam_up * p.y, 1.0);
+}
+"""
+
+_LENS_FS = "#version 330 core\n" + _COMMON + """
+in vec2 v_uv;
+uniform vec3 u_tint;                            // the picture's average colour (display-encoded)
+uniform float u_strength;
+out vec4 colour;
+void main() {
+    float d = length(v_uv);
+    float core = 2.2 * exp(-pow(d / 0.10, 2.0));
+    float halo = 0.26 / (1.0 + pow(d / 0.17, 2.0));
+    float streak = 0.40 * exp(-abs(v_uv.y) / 0.014) * exp(-abs(v_uv.x) / 0.50);
+    float fade = (1.0 - smoothstep(0.65, 1.0, abs(v_uv.x))) * (1.0 - smoothstep(0.65, 1.0, abs(v_uv.y)));
+    vec3 c = mix(vec3(1.0), to_linear(u_tint) * 2.0, 0.45) * (core + halo + streak) * fade * u_strength;
+    colour = vec4(to_display(c), 1.0);
 }
 """
 
@@ -235,7 +340,10 @@ void main() {
 
 #: The halo around the screen. Falloff per metre, and the distance (metres from the picture's edge) where the fade-out starts and ends.
 GLOW_REACH = (1.5, 0.7, 1.9)
-GLOW_STRENGTH = 0.8
+GLOW_STRENGTH = 4.2
+#: The projector's beam and lens (see _BEAM_FS): overall strength, and how far the lens flare reaches (metres from its centre).
+BEAM_STRENGTH = 0.13
+LENS_SIZE = 0.8
 #: How strongly each kind of surface takes the glow: the wall behind the screen fully, the floor/top/sides less ("fade heavily").
 GLOW_GAIN = {"wall": 1.0, "floor": 0.55, "top": 0.65, "side": 0.5}
 
@@ -282,11 +390,14 @@ class Renderer:
     def __init__(self) -> None:
         self._ready = False
         self.video_size = (0, 0)
+        self._picture_fraction = (1.0, 1.0)    # the picture's size within the room's screen (black bars leave it below 1)
         self.has_picture = False
         self.gain = 1.0
         self.room = None                       # a vr.room.Room, once set_room() has been called
         self._room_gl = None                   # its OpenGL objects, made on first use
         self.room_light = 1.0                  # 0 = film lighting, 1 = lights up
+        self.beam_on = True                    # the ceiling projector's light beam (the lens of the room's projector glows either way)
+        self.beam_level = 1.0                  # ... and how bright it is: 0.25 .. 2.0 times the normal strength
         self.edge_colours = np.zeros((4, 3), np.float32)       # top, bottom, left, right of the picture, 0..1
 
     # -- set up -----------------------------------------------------------------------------------
@@ -298,11 +409,22 @@ class Renderer:
         self._flat = _compile(_FLAT_VS, _FLAT_FS)
         self._baked = _compile(_BAKED_VS, _BAKED_FS)
         self._glow_program = _compile(_GLOW_VS, _GLOW_FS)
+        self._beam_program = _compile(_GLOW_VS, _BEAM_FS)
+        self._lens_program = _compile(_LENS_VS, _LENS_FS)
+        self._beam_vao = int(GL.glGenVertexArrays(1))
+        self._beam_vbo = int(GL.glGenBuffers(1))
+        GL.glBindVertexArray(self._beam_vao)
+        GL.glBindBuffer(GL.GL_ARRAY_BUFFER, self._beam_vbo)
+        GL.glBufferData(GL.GL_ARRAY_BUFFER, 18 * 12, None, GL.GL_DYNAMIC_DRAW)
+        GL.glEnableVertexAttribArray(0)
+        GL.glVertexAttribPointer(0, 3, GL.GL_FLOAT, GL.GL_FALSE, 12, GL.ctypes.c_void_p(0))
+        GL.glBindVertexArray(0)
         self._panel = _compile(_SCREEN_VS, _PANEL_FS)
         self._panel_texture = 0
         self._panel_size = (0, 0)
         self._vao_quad = self._vao(np.array([(-.5, -.5), (.5, -.5), (.5, .5), (-.5, -.5), (.5, .5), (-.5, .5)], np.float32),
                                    [(0, 2, 0)], 8)
+        self._vao_quad_big = self._vao(np.array([(-1, -1), (1, -1), (1, 1), (-1, -1), (1, 1), (-1, 1)], np.float32), [(0, 2, 0)], 8)
         room = _room_triangles()
         self._room_count = len(room)
         self._vao_room = self._vao(room, [(0, 3, 0), (1, 3, 12)], 24)
@@ -439,7 +561,7 @@ class Renderer:
                           "count": len(quad.indices), "gain": gain})
         self._room_gl = {"groups": groups, "glows": glows}
 
-    def _draw_baked_room(self, vp: np.ndarray, now: float) -> None:
+    def _draw_baked_room(self, vp: np.ndarray, now: float, rect: tuple) -> None:
         if self._room_gl is None:
             self._upload_room()
         program = self._baked
@@ -473,13 +595,17 @@ class Renderer:
             for name, axis in axes.items():
                 GL.glUniform3f(GL.glGetUniformLocation(program, name), *map(float, axis))
             GL.glUniform2f(GL.glGetUniformLocation(program, "u_half"), screen.width / 2, screen.height / 2)
-            for name, colour in zip(("u_top", "u_bottom", "u_left", "u_right_colour"), self.edge_colours):
-                GL.glUniform3f(GL.glGetUniformLocation(program, name), *map(float, colour))
+            GL.glUniform2f(GL.glGetUniformLocation(program, "u_pic"), *self._picture_fraction)
+            GL.glUniform1i(GL.glGetUniformLocation(program, "u_tex"), 0)
+            GL.glUniform4f(GL.glGetUniformLocation(program, "u_rect"), *rect)
+            GL.glUniform1f(GL.glGetUniformLocation(program, "u_gain"), self.gain)
+            GL.glActiveTexture(GL.GL_TEXTURE0)
+            GL.glBindTexture(GL.GL_TEXTURE_2D, self._texture)                  # the picture (unit 0 held the last room texture)
             GL.glUniform3f(GL.glGetUniformLocation(program, "u_reach"), *GLOW_REACH)
             GL.glUniform1f(GL.glGetUniformLocation(program, "u_time"), now)
             base = GLOW_STRENGTH * (1.0 - 0.8 * float(self.room_light))
             GL.glEnable(GL.GL_BLEND)
-            GL.glBlendFunc(GL.GL_ONE, GL.GL_ONE)
+            GL.glBlendFunc(GL.GL_DST_COLOR, GL.GL_ONE)                          # wall * (1 + glow)
             GL.glDepthMask(GL.GL_FALSE)
             for glow in glows:
                 GL.glUniform1f(GL.glGetUniformLocation(program, "u_strength"), base * glow["gain"])
@@ -487,6 +613,84 @@ class Renderer:
                 GL.glDrawElements(GL.GL_TRIANGLES, glow["count"], GL.GL_UNSIGNED_INT, None)
             GL.glDepthMask(GL.GL_TRUE)
             GL.glDisable(GL.GL_BLEND)
+
+    def _draw_projector(self, vp: np.ndarray, view: np.ndarray, eye_position, rect: tuple, picture: np.ndarray,
+                        now: float) -> None:
+        """The ceiling projector at work, only with the room lights down: its beam through the air (which can be switched off or
+        dimmed) and its lens (which always glows, as bright as the picture is)."""
+        dark = 1.0 - float(np.clip(self.room_light, 0.0, 1.0))
+        if dark < 0.02:
+            return
+        lens = np.asarray(self.room.projector_lens, np.float64)
+        GL.glActiveTexture(GL.GL_TEXTURE0)
+        GL.glBindTexture(GL.GL_TEXTURE_2D, self._texture)
+        GL.glEnable(GL.GL_BLEND)
+        GL.glBlendFunc(GL.GL_ONE, GL.GL_ONE)
+        GL.glDepthMask(GL.GL_FALSE)
+        if self.beam_on and self.beam_level > 0.0:
+            self._draw_projector_beam(vp, eye_position, rect, picture, now, lens, BEAM_STRENGTH * float(self.beam_level) * dark * dark)
+        self._draw_lens(vp, view, picture, now, lens, dark)
+        GL.glDepthMask(GL.GL_TRUE)
+        GL.glDisable(GL.GL_BLEND)
+
+    def _draw_projector_beam(self, vp: np.ndarray, eye_position, rect: tuple, picture: np.ndarray, now: float, lens: np.ndarray,
+                   strength: float) -> None:
+        corners = [picture @ np.array([sx, sy, 0.0, 1.0]) for sx, sy in ((-0.5, 0.5), (0.5, 0.5), (0.5, -0.5), (-0.5, -0.5))]
+        base = []
+        for c in corners:
+            c = c[:3]
+            away = lens - c
+            base.append(c + away / (np.linalg.norm(away) or 1.0) * 0.02)   # a little short of the screen, so it never fights it
+        points = [lens] + base
+        triangles = [(0, 1, 2), (0, 2, 3), (0, 3, 4), (0, 4, 1), (1, 3, 2), (1, 4, 3)]
+        centre = np.mean(points, axis=0)
+        ordered, planes = [], []
+        for a, b, c in triangles:
+            pa, pb, pc = points[a], points[b], points[c]
+            n = np.cross(pb - pa, pc - pa)
+            if float(n @ ((pa + pb + pc) / 3.0 - centre)) < 0:             # make every face's winding point outward
+                b, c, pb, pc = c, b, pc, pb
+                n = -n
+            n = n / (np.linalg.norm(n) or 1.0)
+            ordered += [points[a], points[b], points[c]]
+            planes.append((*n, float(n @ pa)))
+        planes = np.array(planes[:5], np.float32)
+        GL.glBindBuffer(GL.GL_ARRAY_BUFFER, self._beam_vbo)
+        GL.glBufferSubData(GL.GL_ARRAY_BUFFER, 0, 18 * 12, np.ascontiguousarray(ordered, np.float32))
+        program = self._beam_program
+        GL.glUseProgram(program)
+        self._m4(program, "u_vp", vp)
+        self._m4(program, "u_pic_inv", np.linalg.inv(picture))
+        GL.glUniform3f(GL.glGetUniformLocation(program, "u_eye"), *map(float, eye_position))
+        GL.glUniform3f(GL.glGetUniformLocation(program, "u_lens"), *map(float, lens))
+        GL.glUniform4fv(GL.glGetUniformLocation(program, "u_planes"), 5, planes)
+        GL.glUniform1i(GL.glGetUniformLocation(program, "u_tex"), 0)
+        GL.glUniform4f(GL.glGetUniformLocation(program, "u_rect"), *rect)
+        GL.glUniform1f(GL.glGetUniformLocation(program, "u_gain"), self.gain)
+        GL.glUniform1f(GL.glGetUniformLocation(program, "u_time"), now)
+        GL.glUniform1f(GL.glGetUniformLocation(program, "u_strength"), strength)
+        GL.glEnable(GL.GL_CULL_FACE)
+        GL.glCullFace(GL.GL_FRONT)                                         # one fragment per pixel: the far side of the beam
+        GL.glBindVertexArray(self._beam_vao)
+        GL.glDrawArrays(GL.GL_TRIANGLES, 0, 18)
+        GL.glDisable(GL.GL_CULL_FACE)
+
+    def _draw_lens(self, vp: np.ndarray, view: np.ndarray, picture: np.ndarray, now: float, lens: np.ndarray, dark: float) -> None:
+        """A sprite that turns to face the viewer, a few centimetres out in front of the glass, as bright as the picture."""
+        toward = np.asarray(picture[:3, 3], np.float64) - lens
+        toward /= np.linalg.norm(toward) or 1.0
+        program = self._lens_program
+        GL.glUseProgram(program)
+        self._m4(program, "u_vp", vp)
+        GL.glUniform3f(GL.glGetUniformLocation(program, "u_centre"), *map(float, lens + toward * 0.04))
+        GL.glUniform3f(GL.glGetUniformLocation(program, "u_cam_right"), *(view[0, :3] * LENS_SIZE).astype(float))
+        GL.glUniform3f(GL.glGetUniformLocation(program, "u_cam_up"), *(view[1, :3] * LENS_SIZE).astype(float))
+        GL.glUniform3f(GL.glGetUniformLocation(program, "u_tint"), *map(float, self.glow))
+        brightness = 0.10 + 0.90 * float(np.clip(np.mean(self.glow) * 2.5, 0.0, 1.0))      # a dark scene, a dim lens
+        GL.glUniform1f(GL.glGetUniformLocation(program, "u_strength"), dark * brightness)
+        GL.glUniform1f(GL.glGetUniformLocation(program, "u_time"), now)
+        GL.glBindVertexArray(self._vao_quad_big)
+        GL.glDrawArrays(GL.GL_TRIANGLES, 0, 6)
 
     def set_panel_image(self, rgba: np.ndarray) -> None:
         """The menu panel's picture: height x width x 4 uint8, straight alpha, row 0 at the top."""
@@ -553,7 +757,12 @@ class Renderer:
             GL.glDrawArrays(GL.GL_TRIANGLES, 0, self._room_count)
 
         if scene == BAKED and self.room is not None:
-            self._draw_baked_room(vp, now)
+            if screen.fixed is not None and screen.picture_aspect:
+                full, fitted = np.linalg.norm(screen.fixed[:3, :2], axis=0), np.linalg.norm(screen.picture_matrix()[:3, :2], axis=0)
+                self._picture_fraction = (float(fitted[0] / max(full[0], 1e-9)), float(fitted[1] / max(full[1], 1e-9)))
+            else:
+                self._picture_fraction = (1.0, 1.0)
+            self._draw_baked_room(vp, now, rect)
             GL.glActiveTexture(GL.GL_TEXTURE0)
             GL.glBindTexture(GL.GL_TEXTURE_2D, self._texture)
 
@@ -576,6 +785,8 @@ class Renderer:
             GL.glUniform1f(GL.glGetUniformLocation(program, "u_time"), now)
             GL.glBindVertexArray(self._vao_quad)
             GL.glDrawArrays(GL.GL_TRIANGLES, 0, 6)
+            if scene == BAKED and self.room is not None and self.room.projector_lens is not None:
+                self._draw_projector(vp, view, eye_position, rect, model, now)
 
         if panel is not None and self._panel_texture:
             GL.glUseProgram(self._panel)

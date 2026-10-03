@@ -361,6 +361,20 @@ into the edges of the ceiling panels (the first two bakes packed islands 6 px ap
 the flat ceiling is its own 2048 group; the nine chairs are split per row (`split_chairs`, three 4096 atlases at ~620 px/m with 10 px
 gaps, was one at 288); `Wood2` (the gold lattice, driven by a Metallic map) is baked as diffuse because shine cannot be baked.
 GPU memory of the room is now ~1.6 GB (lit+dim+screen, mipmapped); the old one was ~0.7 GB.
+**Spill glow, projector and the beam option (2026-10-03, after headset feedback).** The glow around the screen is no longer an edge colour
+(copying the nearest edge pixel smeared each picture row straight out sideways, and averaging the four edges turned a half-orange,
+half-blue picture grey above and below): `_GLOW_FS` mirror-tiles the picture outward over the glow planes (flipped over every edge and
+corner), blurs it into mush (`lod` 7+, 3x3 taps, wider with distance) and *multiplies* the wall's own colour (`GL_DST_COLOR, GL_ONE`:
+wall * (1 + glow)) so the plaster texture shows through instead of a flat wash lying on it. `GLOW_STRENGTH` 4.2 is tuned for that blend.
+The BiasGlow planes are invisible canvases (they only mark where spill may land); nothing draws them.
+The room's ceiling projector: the `Projector_Lens` empty is exported in room.glb (`room.projector_lens`). `renderer._draw_projector`
+draws, only with the lights down: the *beam* (`_BEAM_FS`: a pyramid lens -> picture corners, far faces only; each pixel intersects its eye
+ray with five planes and sums 8 haze samples, tinted by the part of the picture each sample aims at, soft sides, dust drift and motes)
+and the *lens* (`_LENS_FS`: a camera-facing sprite, as bright as the picture). The beam alone has an on/off switch and a brightness
+(`BEAM_LEVELS` 25%..200%): the headset menu's Beam row, Settings > Virtual reality, `settings.vr_beam` / `vr_beam_level`,
+`VRController.set_beam` / `beam_changed`. The lens always glows. Do not name a renderer method `_draw_beam`: that is the pointer ray.
+Idea agreed but not built: many films are 2.35:1 with the bars burned into a 16:9 frame; detect those bars and fit the real picture
+area, and make the room's Screen object 2.35:1 (Blender change + screen-light re-bake only).
 **Pointer rays are drawn last, on top, without depth test** (`renderer.draw_eye`, 5-element tuples (origin, direction, length,
 colour, landed) with a dot at the tip when `landed`). Depth-tested they were hidden piecemeal by chair backs and the console and
 looked "cut in half and shifted" in the headset; the menu panel also showed them ghosting through it. Reproduce without a

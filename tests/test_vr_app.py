@@ -70,6 +70,9 @@ class FakeVR:
     def watch(self, on):
         self.calls.append(("watch", on))
 
+    def set_beam(self, on, level):
+        self.calls.append(("beam", on, level))
+
 
 @pytest.fixture()
 def win(qapp, monkeypatch, tmp_path):
@@ -228,3 +231,39 @@ def test_the_settings_switch_for_getting_ready_is_saved(win):
     assert win.settings.vr_auto_connect is False
     win.settings_page.vr_auto.setChecked(True)
     assert win.settings.vr_auto_connect is True
+
+
+def test_the_projector_beam_switch_and_brightness_are_saved_and_sent_to_the_headset(win):
+    sp = win.settings_page
+    sp.vr_beam.setChecked(False)
+    assert win.settings.vr_beam is False and ("beam", False, 1.0) in win.vr.calls
+    sp.vr_beam.setChecked(True)
+    sp.vr_beam_box.setCurrentIndex(sp.vr_beam_box.findData(1.5))
+    assert win.settings.vr_beam_level == 1.5 and win.vr.calls[-1] == ("beam", True, 1.5)
+
+
+def test_a_beam_change_made_in_the_headset_shows_in_settings_without_echoing_back(win):
+    win.vr.calls.clear()
+    win._vr_beam_from_headset(False, 0.5)
+    sp = win.settings_page
+    assert win.settings.vr_beam is False and win.settings.vr_beam_level == 0.5
+    assert not sp.vr_beam.isChecked() and sp.vr_beam_box.currentData() == 0.5
+    assert not any(isinstance(c, tuple) and c[0] == "beam" for c in win.vr.calls)      # the headset already knows
+
+
+def test_the_projector_beam_choice_is_saved_and_a_damaged_value_is_ignored(tmp_path):
+    import json
+
+    from ultimate_video_3d.settings import AppSettings
+
+    settings = AppSettings()
+    assert settings.vr_beam is True and settings.vr_beam_level == 1.0               # on, at the normal strength, for everyone to begin with
+    settings.vr_beam, settings.vr_beam_level = False, 0.5
+    settings.save(tmp_path / "s.json")
+    loaded = AppSettings.load(tmp_path / "s.json")
+    assert loaded.vr_beam is False and loaded.vr_beam_level == 0.5
+    raw = json.loads((tmp_path / "s.json").read_text())
+    raw["vr_beam"], raw["vr_beam_level"] = "yes", 99
+    (tmp_path / "s.json").write_text(json.dumps(raw))
+    damaged = AppSettings.load(tmp_path / "s.json")
+    assert damaged.vr_beam is True and damaged.vr_beam_level == 2.0                  # not a switch: ignored; too bright: held at the top

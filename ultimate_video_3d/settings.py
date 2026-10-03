@@ -84,6 +84,8 @@ class AppSettings:
     vr_room_dir: str = ""                # a baked VR room folder; "" = the first one found, or the plain stand-in room
     vr_auto_connect: bool = True         # on the Library tab, look for a headset and get ready for it by itself
     vr_audio_device: str = ""            # the sound device chosen in the headset's menu; "" = the headset's own, automatically
+    vr_beam: bool = True                 # the projector's light beam through the room's air (the lens glows either way)
+    vr_beam_level: float = 1.0           # how bright that beam is: 0.25 .. 2.0 times the normal strength
     #: The first-launch encoder probe (see encoders.ProbeReport), or {} if not run.
     encoder_probe: dict = field(default_factory=dict)
     #: 0 for a fresh install; the version of the tour last seen.
@@ -138,6 +140,10 @@ class AppSettings:
             settings.check_updates = raw["check_updates"]
         if isinstance(raw.get("vr_auto_connect"), bool):
             settings.vr_auto_connect = raw["vr_auto_connect"]
+        if isinstance(raw.get("vr_beam"), bool):
+            settings.vr_beam = raw["vr_beam"]
+        if isinstance(raw.get("vr_beam_level"), (int, float)) and not isinstance(raw.get("vr_beam_level"), bool):
+            settings.vr_beam_level = min(2.0, max(0.25, float(raw["vr_beam_level"])))
         settings.force_cpu_depth = bool(raw.get("force_cpu_depth", False))
         return settings
 

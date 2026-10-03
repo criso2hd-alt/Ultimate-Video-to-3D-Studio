@@ -30,7 +30,7 @@ def _quad(corners, normal):
     return positions, uv, np.array([0, 1, 2, 0, 2, 3], np.uint16), np.array([normal] * 4, np.float32)
 
 
-def _make_room(folder: Path, lit=(128, 128, 128), dim=(20, 20, 20), screen=(255, 255, 255)) -> Path:
+def _make_room(folder: Path, lit=(128, 128, 128), dim=(20, 20, 20), screen=(255, 255, 255), lens=None) -> Path:
     folder.mkdir(parents=True, exist_ok=True)
     meshes = {
         "Floor": _quad([(-4, 0, 9), (4, 0, 9), (4, 0, 0), (-4, 0, 0)], (0, 1, 0)),
@@ -61,6 +61,8 @@ def _make_room(folder: Path, lit=(128, 128, 128), dim=(20, 20, 20), screen=(255,
         mesh_defs.append({"name": name, "primitives": [prim]})
         nodes.append({"name": name, "mesh": len(mesh_defs) - 1})
     nodes.append({"name": "Seat_Centre", "translation": [0, 1.2, 6.0], "extras": {"label": "Centre"}})
+    if lens is not None:
+        nodes.append({"name": "Projector_Lens", "translation": list(lens)})        # an empty: where the beam starts
 
     ok, png = cv2.imencode(".png", np.full((8, 8, 3), lit[::-1], np.uint8))                 # the lit bake, embedded
     image_view = add(np.frombuffer(png.tobytes(), np.uint8))
@@ -152,18 +154,19 @@ def gl():
     glfw.terminate()
 
 
-def _shot(room, picture, light):
-    """Draw the room from its seat, looking at the screen, with this picture on it and these room lights."""
+def _shot(room, picture, light, orientation=(0, 0, 0, 1), beam=(True, 1.0)):
+    """Draw the room from its seat (looking at the screen unless turned), with this picture on it and these room lights."""
     r = rend.Renderer()
     r.init_gl()
     r.set_room(room)
     r.room_light = light
+    r.beam_on, r.beam_level = beam
     r.upload(picture)
     r.gain = 1.0
     seat = room.first_seat()
     half = np.radians(45)
     proj = geo.projection_matrix(-half, half, half * H / W, -half * H / W)
-    view = geo.view_matrix(tuple(seat.position), (0, 0, 0, 1))
+    view = geo.view_matrix(tuple(seat.position), orientation)
     screen = geo.Screen.from_quad(room.screen.matrix, room.screen.width, room.screen.height)
     GL.glViewport(0, 0, W, H)
     r.draw_eye(view, proj, 0, tuple(seat.position), screen, "", rend.BAKED)
@@ -202,11 +205,80 @@ def test_the_screens_light_takes_the_pictures_colour_when_the_room_is_dark(gl, r
     assert wall_red[0] > wall_red[2] and wall_blue[2] > wall_blue[0]
 
 
-def test_the_glow_behind_the_screen_follows_the_nearest_edge_colour(gl, room):
-    picture = np.zeros((90, 160, 3), np.uint8)
-    picture[:, :16] = (230, 20, 20)                                           # the left edge is red
-    picture[:, -16:] = (20, 20, 230)                                          # the right edge is blue
+def test_the_glow_beside_the_screen_takes_the_colour_of_the_pictures_nearest_side(gl, room):
+    picture = np.zeros((720, 1280, 3), np.uint8)                               # a real-sized frame: the glow is a heavy blur of it
+    picture[:, :640] = (230, 20, 20)                                           # the left half is red
+    picture[:, 640:] = (20, 20, 230)                                           # the right half is blue
     img = _shot(room, picture, light=0.0)
     left_of_screen, right_of_screen = img[84, 103], img[84, 217]               # the wall at x = -2.15 m and +2.15 m
     assert left_of_screen[0] > left_of_screen[2]                              # the wall left of the screen glows red
     assert right_of_screen[2] > right_of_screen[0]                            # and right of it blue
+
+
+def test_the_glow_spreads_like_light_and_does_not_smear_the_pictures_rows(gl, room):
+    # A picture with one bright red row in an otherwise black frame. Copying the nearest edge pixel would paint a red streak straight
+    # out sideways at that row; light spreads, so the wall beside the screen is a soft wash with no row standing out.
+    picture = np.zeros((90, 160, 3), np.uint8)
+    picture[40:44] = (255, 20, 20)
+    img = _shot(room, picture, light=0.0)
+    column = (img[60:140, 88, 0] - img[60:140, 88, 1]).astype(int)           # red-ness down the wall just left of the screen (x = -2.7 m)
+    red_row = column[(81 - 60) - 3:(81 - 60) + 4]                            # where the picture's bright red row lands, one picture-height over
+    assert np.ptp(column) < 40                                                 # no sharp line anywhere along it
+    assert red_row.mean() - column.mean() < 15                                 # and the red row does not stand out from the rest of the wall
+
+
+def test_the_loader_reads_the_projector_lens_only_when_the_room_has_one(tmp_path):
+    assert roommod.load(_make_room(tmp_path / "plain")).projector_lens is None
+    lens = roommod.load(_make_room(tmp_path / "lens", lens=(0.0, 4.5, 8.0))).projector_lens
+    assert lens.tolist() == pytest.approx([0.0, 4.5, 8.0])
+
+
+LOOK_UP = (np.sin(np.radians(32) / 2), 0.0, 0.0, np.cos(np.radians(32) / 2))              # turned up 32 degrees, toward the beam
+
+
+def _looking_back_up(degrees):
+    """Facing the back of the room (180 degrees about the vertical) and then tilted up."""
+    half = np.radians(degrees) / 2
+    qy, qp = (0.0, 1.0, 0.0, 0.0), (np.sin(half), 0.0, 0.0, np.cos(half))
+    x1, y1, z1, w1 = qy
+    x2, y2, z2, w2 = qp
+    return (w1 * x2 + x1 * w2 + y1 * z2 - z1 * y2, w1 * y2 - x1 * z2 + y1 * w2 + z1 * x2,
+            w1 * z2 + x1 * y2 - y1 * x2 + z1 * w2, w1 * w2 - x1 * x2 - y1 * y2 - z1 * z2)
+
+
+@pytest.fixture()
+def lens_room(tmp_path):
+    return roommod.load(_make_room(tmp_path / "projector", lens=(0.0, 4.5, 8.0)))
+
+
+WHITE = np.full((90, 160, 3), 255, np.uint8)
+
+
+def test_the_beam_shows_in_the_dark_and_can_be_switched_off_or_dimmed(gl, lens_room):
+    on = _shot(lens_room, WHITE, 0.0, LOOK_UP, beam=(True, 1.0)).sum()
+    bright = _shot(lens_room, WHITE, 0.0, LOOK_UP, beam=(True, 2.0)).sum()
+    dim = _shot(lens_room, WHITE, 0.0, LOOK_UP, beam=(True, 0.25)).sum()
+    off = _shot(lens_room, WHITE, 0.0, LOOK_UP, beam=(False, 1.0)).sum()
+    assert on > off + 100000                                                       # there is light in the air that "off" does not have
+    assert bright > on > dim > off                                               # and the brightness setting moves it both ways
+
+
+def test_the_beam_is_only_there_when_the_lights_are_down(gl, lens_room):
+    up_on = _shot(lens_room, WHITE, 1.0, LOOK_UP, beam=(True, 1.0)).sum()
+    up_off = _shot(lens_room, WHITE, 1.0, LOOK_UP, beam=(False, 1.0)).sum()
+    assert abs(up_on - up_off) < 5000
+
+
+def test_the_lens_glows_with_the_picture_whether_or_not_the_beam_is_on(gl, lens_room):
+    aim = _looking_back_up(60)                                                   # at the lens from the seat
+    black = np.zeros((90, 160, 3), np.uint8)
+    for beam in ((True, 1.0), (False, 1.0)):
+        bright = _shot(lens_room, WHITE, 0.0, aim, beam=beam)[H // 2 - 2:H // 2 + 3, W // 2 - 2:W // 2 + 3].mean()
+        dark = _shot(lens_room, black, 0.0, aim, beam=beam)[H // 2 - 2:H // 2 + 3, W // 2 - 2:W // 2 + 3].mean()
+        assert bright > 200 and bright > dark + 40, beam                         # a bright picture, a bright lens; a dark picture, a dim one
+
+
+def test_a_room_without_a_projector_draws_no_beam_or_lens(gl, room):
+    assert room.projector_lens is None
+    loud = _shot(room, WHITE, 0.0, LOOK_UP, beam=(True, 2.0)).sum()
+    assert abs(loud - _shot(room, WHITE, 0.0, LOOK_UP, beam=(False, 0.25)).sum()) < 5000       # (only the shaders' random dithering differs)

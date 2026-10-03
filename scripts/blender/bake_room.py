@@ -678,7 +678,7 @@ def finish_and_export(groups_done: dict, out: Path) -> None:
             obj.select_set(True)
             bpy.context.view_layer.objects.active = obj
             keep.append(obj)
-    for name in ("Screen", "Spawn"):
+    for name in ("Screen", "Spawn", "Projector_Lens"):                 # Projector_Lens: an empty, where the app starts the beam
         if name in bpy.data.objects:
             keep.append(bpy.data.objects[name])
     keep += [o for o in bpy.data.objects if o.name.startswith(GLOW_PREFIX) and o.type == "MESH"]      # BiasGlow, BiasGlow.001...

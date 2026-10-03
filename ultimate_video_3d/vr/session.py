@@ -254,6 +254,8 @@ class VRSession(QObject):
         self._lights = LightFader()
         self._seat_armed = True
         self.menu = Menu()
+        self.beam_on = True                               # the projector's light beam (its lens always glows); the menu and Settings change it
+        self.beam_level = 1.0
         self._panel: np.ndarray | None = None             # where the menu hangs in the room, while it is open
         self._menu_uploaded = -1
         self._replace_panel = False                       # the person moved: hang the menu in front of them again
@@ -303,6 +305,12 @@ class VRSession(QObject):
             first = room.first_seat()
             self._pending_seat = first.name if first is not None else None
         self._room_dirty = True
+        self.menu.set_beam(has=room is not None and room.projector_lens is not None)
+
+    def set_beam(self, on: bool, level: float) -> None:
+        """Show or hide the projector's beam and set how bright it is (any thread; takes effect on the next frame)."""
+        self.beam_on, self.beam_level = bool(on), float(level)
+        self.menu.set_beam(on=self.beam_on, level=self.beam_level)
 
     def seat_names(self) -> list[tuple[str, str]]:
         """(name, label) of every seat in the current room."""
@@ -404,6 +412,7 @@ class VRSession(QObject):
         else:
             screen.aspect = media.aspect
             screen.floor_clearance = 0.12 if self.scene == ROOM else None    # on the room's floor, or at eye height
+        renderer.beam_on, renderer.beam_level = self.beam_on, self.beam_level
         if self.room is not None:
             renderer.room_light = self._lights.update(dt, media.playing, media.is_open, self.room.light_level_paused)
         self._sync_menu(renderer, dt)
@@ -535,6 +544,9 @@ class VRSession(QObject):
             self._recentre.set()
         elif kind == "play":
             self._toggle.set()
+        elif kind == "beam":
+            self.beam_on, self.beam_level = bool(action[1]), float(action[2])
+            self.menu_action.emit(action)                       # the window saves the choice
         elif kind == "screenshot":
             self.menu.close()                             # out of the picture, then a few seconds to look at the screen
             self._shot_timer = SHOT_DELAY
