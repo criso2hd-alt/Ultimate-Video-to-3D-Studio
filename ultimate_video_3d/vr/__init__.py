@@ -24,14 +24,20 @@ def runtime_path() -> str:
         return ""
 
 
+def unavailable_reason() -> str:
+    """Why a VR session cannot be attempted here, in a sentence a person can act on; "" if it can."""
+    if sys.platform != "win32":
+        return "VR is only available on Windows for now."
+    if not runtime_path():
+        return "No OpenXR runtime is installed. Install Meta Quest Link, SteamVR or Virtual Desktop and make it the active OpenXR runtime."
+    for module in ("xr", "glfw", "OpenGL"):
+        try:
+            __import__(module)
+        except Exception as error:  # noqa: BLE001 - any import trouble means "not here"
+            return f"The VR component '{module}' could not be loaded ({type(error).__name__}: {error})."
+    return ""
+
+
 def available() -> bool:
     """True if a VR session could be attempted: Windows, the OpenXR Python bindings, and an installed runtime."""
-    if sys.platform != "win32" or not runtime_path():
-        return False
-    try:
-        import glfw  # noqa: F401
-        import OpenGL  # noqa: F401
-        import xr  # noqa: F401
-    except Exception:  # noqa: BLE001 - any import trouble means "not here"
-        return False
-    return True
+    return not unavailable_reason()

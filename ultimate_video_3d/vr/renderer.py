@@ -212,6 +212,18 @@ void main() { colour = u_colour; }
 """
 
 
+_PANEL_FS = """#version 330 core
+in vec2 v_uv;
+uniform sampler2D u_tex;
+uniform float u_alpha;
+out vec4 colour;
+void main() {
+    vec4 c = texture(u_tex, v_uv);              // already display-encoded, straight alpha
+    colour = vec4(c.rgb, c.a * u_alpha);
+}
+"""
+
+
 def _compile(vertex: str, fragment: str) -> int:
     from OpenGL.GL import shaders
 
@@ -270,6 +282,9 @@ class Renderer:
         self._flat = _compile(_FLAT_VS, _FLAT_FS)
         self._baked = _compile(_BAKED_VS, _BAKED_FS)
         self._glow_program = _compile(_GLOW_VS, _GLOW_FS)
+        self._panel = _compile(_SCREEN_VS, _PANEL_FS)
+        self._panel_texture = 0
+        self._panel_size = (0, 0)
         self._vao_quad = self._vao(np.array([(-.5, -.5), (.5, -.5), (.5, .5), (-.5, -.5), (.5, .5), (-.5, .5)], np.float32),
                                    [(0, 2, 0)], 8)
         room = _room_triangles()
@@ -443,6 +458,26 @@ class Renderer:
             GL.glDepthMask(GL.GL_TRUE)
             GL.glDisable(GL.GL_BLEND)
 
+    def set_panel_image(self, rgba: np.ndarray) -> None:
+        """The menu panel's picture: height x width x 4 uint8, straight alpha, row 0 at the top."""
+        h, w = rgba.shape[:2]
+        if not self._panel_texture:
+            self._panel_texture = int(GL.glGenTextures(1))
+        GL.glBindTexture(GL.GL_TEXTURE_2D, self._panel_texture)
+        if self._panel_size != (w, h):
+            GL.glTexParameteri(GL.GL_TEXTURE_2D, GL.GL_TEXTURE_MIN_FILTER, GL.GL_LINEAR_MIPMAP_LINEAR)
+            GL.glTexParameteri(GL.GL_TEXTURE_2D, GL.GL_TEXTURE_MAG_FILTER, GL.GL_LINEAR)
+            GL.glTexParameteri(GL.GL_TEXTURE_2D, GL.GL_TEXTURE_WRAP_S, GL.GL_CLAMP_TO_EDGE)
+            GL.glTexParameteri(GL.GL_TEXTURE_2D, GL.GL_TEXTURE_WRAP_T, GL.GL_CLAMP_TO_EDGE)
+            try:
+                GL.glTexParameterf(GL.GL_TEXTURE_2D, 0x84FE, 8.0)       # anisotropic: small text stays readable at a slant
+            except Exception:  # noqa: BLE001 - not every driver has it
+                pass
+            self._panel_size = (w, h)
+        GL.glPixelStorei(GL.GL_UNPACK_ALIGNMENT, 1)
+        GL.glTexImage2D(GL.GL_TEXTURE_2D, 0, GL.GL_RGBA8, w, h, 0, GL.GL_RGBA, GL.GL_UNSIGNED_BYTE, np.ascontiguousarray(rgba))
+        GL.glGenerateMipmap(GL.GL_TEXTURE_2D)
+
     def clear_picture(self) -> None:
         self.has_picture = False
         self.glow = np.zeros(3, np.float32)
@@ -450,10 +485,11 @@ class Renderer:
     # -- one eye ----------------------------------------------------------------------------------
 
     def draw_eye(self, view: np.ndarray, projection: np.ndarray, eye: int, eye_position, screen: geo.Screen,
-                 layout: str, scene: str = ROOM, pointers: tuple = ()) -> None:
+                 layout: str, scene: str = ROOM, pointers: tuple = (), panel: np.ndarray | None = None) -> None:
         """Draw everything for one eye into the currently bound framebuffer (its viewport already set).
 
         ``pointers`` is a sequence of (origin, direction, length, colour) beams to draw (the controllers' rays).
+        ``panel`` places the menu (unit quad -> world) when it is open; nothing is drawn if it is None.
         """
         if not self._ready:
             self.init_gl()
@@ -516,6 +552,22 @@ class Renderer:
             GL.glBindVertexArray(self._vao_cube)
             for origin, direction, length, colour in pointers:
                 self._draw_beam(vp, origin, direction, length, colour)
+        if panel is not None and self._panel_texture:
+            GL.glUseProgram(self._panel)
+            self._m4(self._panel, "u_mvp", vp @ panel)
+            GL.glActiveTexture(GL.GL_TEXTURE0)
+            GL.glBindTexture(GL.GL_TEXTURE_2D, self._panel_texture)
+            GL.glUniform1i(GL.glGetUniformLocation(self._panel, "u_tex"), 0)
+            GL.glUniform1f(GL.glGetUniformLocation(self._panel, "u_alpha"), 1.0)
+            GL.glEnable(GL.GL_BLEND)
+            GL.glBlendFunc(GL.GL_SRC_ALPHA, GL.GL_ONE_MINUS_SRC_ALPHA)
+            GL.glDepthMask(GL.GL_FALSE)
+            GL.glDisable(GL.GL_DEPTH_TEST)               # a menu is never hidden by the room: the chair in front of you must not cover it
+            GL.glBindVertexArray(self._vao_quad)
+            GL.glDrawArrays(GL.GL_TRIANGLES, 0, 6)
+            GL.glEnable(GL.GL_DEPTH_TEST)
+            GL.glDepthMask(GL.GL_TRUE)
+            GL.glDisable(GL.GL_BLEND)
         GL.glBindVertexArray(0)
         GL.glUseProgram(0)
 

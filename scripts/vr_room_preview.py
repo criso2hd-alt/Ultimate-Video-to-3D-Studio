@@ -1,9 +1,9 @@
 """Draw a baked VR room offscreen from a seat, with a picture on the screen, and save the pictures: no headset needed.
 
-    python scripts/vr_room_preview.py <room_folder> <out_dir> [--seat Seat_R2_Centre] [--picture some.mp4|image.png]
+    python scripts/vr_room_preview.py <room_folder> <out_dir> [--seat Seat_R2_Centre] [--picture some.mp4|image.png] [--menu main|videos|help]
 
 Writes ``seat_<name>_<state>.png`` for the room lights up, half up (a pause) and down (the film), plus a sheet of them
-all. The picture is a frame from the given video or image, or a built-in colour test picture. Uses the same renderer the
+all. With ``--menu`` the headset's menu panel is hung in front of the seat and drawn too (``<seat>_menu.png``). The picture is a frame from the given video or image, or a built-in colour test picture. Uses the same renderer the
 headset uses, so what shows here is what the headset draws, minus the stereo.
 """
 
@@ -102,6 +102,25 @@ def main() -> int:
     quat = (float(np.sin(pitch / 2)), 0.0, 0.0, float(np.cos(pitch / 2)))
     view = geo.view_matrix(tuple(seat.position), quat)
     GL.glViewport(0, 0, W, H)
+    if "--menu" in args:
+        from PySide6.QtWidgets import QApplication
+
+        from ultimate_video_3d.vr import menu as menumod
+
+        _app = QApplication.instance() or QApplication([])
+        menu = menumod.Menu()
+        menu.sync(playing=True, title="Behind the scenes", has_media=True, has_lights=True, seat_label=seat.label, has_seats=True)
+        menu.show(args[args.index("--menu") + 1])
+        image = menu.image()
+        pixels = np.frombuffer(bytes(image.constBits()), np.uint8).reshape(image.height(), image.bytesPerLine() // 4, 4)
+        r.set_panel_image(pixels[:, :image.width()])
+        eye_to_screen = room.screen.centre - seat.position
+        panel = geo.panel_matrix(seat.position, eye_to_screen, 1.3, menumod.ASPECT)
+        r.room_light = room.light_level_paused
+        r.draw_eye(view, proj, 0, tuple(seat.position), screen, "", rend.BAKED, (), panel)
+        shown = np.frombuffer(GL.glReadPixels(0, 0, W, H, GL.GL_RGB, GL.GL_UNSIGNED_BYTE), np.uint8).reshape(H, W, 3)[::-1]
+        cv2.imwrite(str(out / f"{seat.name}_menu.png"), cv2.cvtColor(shown, cv2.COLOR_RGB2BGR))
+        print("wrote the menu view")
     shots = []
     for label, light in (("lights_up", 1.0), ("paused", room.light_level_paused), ("film", 0.0)):
         r.room_light = light

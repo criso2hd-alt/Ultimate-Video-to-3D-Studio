@@ -49,6 +49,7 @@ def test_welcome_dialog_lists_the_features_and_offers_tour_or_skip(qapp):
     dialog = onboarding.WelcomeDialog(paths.package_dir() / "assets" / "icon.png")
     texts = " ".join(label.text() for label in dialog.findChildren(QLabel))
     assert "any GPU" in texts and "codecs" in texts and "LUT" in texts
+    assert "VR" in texts and "Library" in texts and "Blu-rays" in texts
     assert dialog.start_button.text() == "Show me around" and dialog.skip_button.text() == "Skip tutorial"
     dialog.start_button.click()
     assert dialog.result() == QDialog.DialogCode.Accepted
@@ -57,12 +58,30 @@ def test_welcome_dialog_lists_the_features_and_offers_tour_or_skip(qapp):
     assert other.result() == QDialog.DialogCode.Rejected
 
 
+def test_the_welcome_dialog_is_tall_enough_for_all_its_text_even_with_a_parent(win, qapp):
+    from PySide6.QtWidgets import QLabel
+
+    dialog = onboarding.WelcomeDialog(paths.package_dir() / "assets" / "icon.png", win)
+    dialog.show()
+    _spin(qapp, 0.3)
+    assert dialog.height() >= dialog.layout().totalHeightForWidth(dialog.width())
+    for label in dialog.findChildren(QLabel):
+        if label.wordWrap():
+            assert label.height() >= label.heightForWidth(label.width()), label.text()[:40]
+    dialog.close()
+
+
 def test_every_tour_step_points_at_a_real_visible_widget(win, qapp):
     steps = win._tour_steps()
     titles = [s.title for s in steps]
     assert titles[:3] == ["Your video", "Pick a view", "Timeline"] and "Export" in titles and "Convert" in titles
     assert "Professional colour correction" in titles and not any("Lumetri" in s.title + s.body for s in steps)
-    assert len(steps) >= 11
+    assert len(steps) >= 14
+    assert titles.index("Library") < titles.index("Watch in VR") < titles.index("Settings")
+    body = " ".join(s.body for s in steps)
+    for word in ("Zones", "Depth cleanup", "Pause", "Recycle Bin", "Play in VR", "copy-protected"):
+        assert word.lower() in body.lower(), word
+    assert "coming in a later version" not in body                           # disc import exists now
     win.start_tutorial()
     overlay = win._tour_overlay
     for i in range(len(overlay._steps)):
@@ -204,3 +223,7 @@ def test_skipping_the_welcome_marks_it_seen(win, qapp, monkeypatch):
     _spin(qapp, 0.4)
     assert win._tour_overlay is not None                                    # "Show me around" starts the tour
     win._tour_overlay._skip()
+
+
+def test_people_who_saw_the_first_tour_are_offered_the_new_one():
+    assert onboarding.ONBOARDING_VERSION >= 2                                # v0.1.0 users had version 1

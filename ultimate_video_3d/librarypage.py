@@ -313,7 +313,7 @@ class LibraryPage(QWidget):
         self.vr_button.setObjectName("secondary")
         self.vr_button.setToolTip("Watch this video in your VR headset (put the headset on when it says so).")
         self.vr_button.clicked.connect(self._play_in_vr)
-        self.vr_button.setVisible(False)
+        self.vr_button.setToolTip("Watch this video in your VR headset (put the headset on when it says so).")
         self.delete_button = QPushButton("Delete…")
         self.delete_button.setObjectName("secondary")
         self.delete_button.setToolTip("Move the file to the Recycle Bin.")
@@ -523,10 +523,13 @@ class LibraryPage(QWidget):
         self.player.shutdown()
         self._thumbs.shutdown(wait=False, cancel_futures=True)
 
-    def set_vr_available(self, available: bool) -> None:
-        """Show the Play in VR button (the window says whether a headset can be used on this computer)."""
+    def set_vr_available(self, available: bool, reason: str = "") -> None:
+        """The Play in VR button is always there; it is faded out, with the reason as its tooltip, when this computer
+        cannot do VR (the window says so). A headset that is merely not connected is reported when it is clicked."""
         self._vr_available = available
-        self.vr_button.setVisible(available)
+        self.vr_button.setToolTip(
+            "Watch this video in your VR headset (put the headset on when it says so)." if available
+            else reason or "VR is not available on this computer.")
         self._selected(self.selected_entry())
 
     def _play_in_vr(self) -> None:

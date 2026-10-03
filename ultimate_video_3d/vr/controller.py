@@ -34,6 +34,8 @@ class VRController(QObject):
         self._loop = False
         self._muted_preview = False          # the first press of play unmutes a muted preview
         self._wants_play = False             # play as soon as the headset is on
+        self._tiles: list = []               # the Library as the headset's Videos page shows it
+        self._volume = 1.0
         self.state = "off"
 
     # -- facts ------------------------------------------------------------------------------------
@@ -71,6 +73,10 @@ class VRController(QObject):
         self.session.worn_changed.connect(self._on_worn)
         self.session.failed.connect(self._on_failed)
         self.session.stopped.connect(self._on_stopped)
+        self.session.menu_action.connect(self._on_menu_action)
+        self.session.set_videos(self._tiles)
+        if hasattr(self.media, "set_volume"):
+            self.media.set_volume(self._volume)
         if hasattr(self.media, "failed"):
             self.media.failed.connect(self.notice)
 
@@ -144,6 +150,27 @@ class VRController(QObject):
                 self.media.play()
             return
         self.media.toggle()
+
+    # -- the menu in the headset ---------------------------------------------------------------------
+
+    def set_videos(self, tiles: list) -> None:
+        """The Library for the menu's Videos page (a list of menu.Tile). Kept, and given to the headset when it starts."""
+        self._tiles = list(tiles)
+        if self.session is not None:
+            self.session.set_videos(self._tiles)
+
+    def _on_menu_action(self, action: tuple) -> None:
+        """A button in the headset's menu that only this side can do (UI thread)."""
+        kind = action[0]
+        if kind == "video":
+            tile = action[1]
+            self.show(Path(tile.path), tile.layout, preview=False)
+        elif kind == "volume":
+            self._volume = float(action[1])
+            if self.media is not None and hasattr(self.media, "set_volume"):
+                self.media.set_volume(self._volume)
+        elif kind == "exit":
+            self.stop()
 
     # -- seats ------------------------------------------------------------------------------------------
 

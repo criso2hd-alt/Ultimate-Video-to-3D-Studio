@@ -40,7 +40,7 @@ from PySide6.QtWidgets import (
 from .widgets import FONT_DISPLAY, FONT_MONO, apply_font
 
 #: Increment only when people who have already seen the tutorial should be offered a new one.
-ONBOARDING_VERSION = 1
+ONBOARDING_VERSION = 2
 
 
 def _css_cubic_bezier(x1: float, y1: float, x2: float, y2: float) -> QEasingCurve:
@@ -77,6 +77,9 @@ class WelcomeDialog(QDialog):
         ("See it before you convert", "A live 3D preview with views that prove the depth, no glasses needed."),
         ("Grade it too", "Professional colour correction and .cube LUTs, with live scopes."),
         ("All the codecs", "H.264, H.265, AV1, VP9, ProRes, DNxHR, FFV1 - 10-bit HDR stays HDR."),
+        ("Your discs and your library", "Copy your own DVDs and Blu-rays, pause a long conversion and resume it later, "
+                                        "keep every result in the Library."),
+        ("Watch it in VR", "Play any video on a big screen in a home theatre in your OpenXR headset."),
     )
 
     def __init__(self, icon_path: Path | None, parent: QWidget | None = None,
@@ -155,6 +158,14 @@ class WelcomeDialog(QDialog):
                 color: {c['ink_dim']}; border: 1px solid {c['line']}; background: {c['base']};
             }}
         """)
+
+    def showEvent(self, event) -> None:  # noqa: N802 - Qt name
+        """Grow to fit the text. Wrapped labels report their height for the narrowest width, so a dialog that opens at
+        its minimum width can come out too short and the lines are drawn over each other."""
+        super().showEvent(event)
+        needed = self.layout().totalHeightForWidth(self.width())
+        if needed > self.height():
+            self.resize(self.width(), needed)
 
 
 class SpotlightOverlay(QWidget):

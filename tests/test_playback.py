@@ -346,15 +346,15 @@ def test_wheel_over_a_control_scrolls_the_panel_not_the_control(qapp):
         qapp.removeEventFilter(guard)
 
 
-def test_version_is_0_1_0_everywhere():
+def test_version_is_0_2_0_everywhere():
     import re
 
     import ultimate_video_3d
 
     root = Path(__file__).resolve().parent.parent
-    assert ultimate_video_3d.__version__ == "0.1.0"
-    assert re.search(r'^version = "0\.1\.0"', (root / "pyproject.toml").read_text(encoding="utf-8"), re.M)
-    assert 'CFBundleShortVersionString": "0.1.0"' in (root / "UltimateVideo3DStudio.spec").read_text(encoding="utf-8")
+    assert ultimate_video_3d.__version__ == "0.2.0"
+    assert re.search(r'^version = "0\.2\.0"', (root / "pyproject.toml").read_text(encoding="utf-8"), re.M)
+    assert 'CFBundleShortVersionString": "0.2.0"' in (root / "UltimateVideo3DStudio.spec").read_text(encoding="utf-8")
 
 
 # --- automatic frame-rate tuning ---------------------------------------------

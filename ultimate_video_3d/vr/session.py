@@ -9,9 +9,12 @@ States, as the runtime reports them: IDLE -> READY -> SYNCHRONIZED -> VISIBLE ->
 *worn* from VISIBLE on; that is what starts a waiting preview.
 
 Controls (any OpenXR controller, bound for Touch, Index, Vive, Windows MR and the generic "simple" profile):
-  trigger on the screen / A or X ...... play and pause          B or Y ....... bring the screen back in front of me
-  right stick up/down ................. screen size              left stick up/down ... screen distance
-  left stick left/right ............... back / forward 10 s      grip ......... hold to drag the screen around
+  trigger on the screen / A or X ...... play and pause          left menu button / B / Y ... open or close the menu
+  left stick left/right ............... back / forward 10 s      right stick left/right ..... change seat (in a room)
+  right stick PRESSED DOWN ............ reset the view: sit back in the seat / screen back in front of me
+In the plain room (no baked room): right stick up/down = screen size, left stick up/down = distance, grip = drag.
+The menu is a floating panel (see menu.py): point with a controller, pull the trigger. It also shows, by itself, the
+first time the headset goes on, so nobody has to guess what the buttons do.
 """
 
 from __future__ import annotations
@@ -26,14 +29,19 @@ import numpy as np
 from PySide6.QtCore import QObject, Signal
 
 from . import geometry as geo
-from .media import VRMedia
 from . import room as roommod
+from .media import VRMedia
+from .menu import ASPECT as MENU_ASPECT
+from .menu import Menu
 from .renderer import BAKED, ROOM, Renderer
 from .state import LightFader, SeatCycle
 
 APP_NAME = "Ultimate Video to 3D Studio"
 SEEK_MS = 10_000
 BEAM_IDLE, BEAM_HIT = (0.55, 0.6, 0.7, 0.8), (0.3, 0.85, 1.0, 1.0)
+MENU_WIDTH = 1.0                           # metres, the menu panel in the room
+MENU_DISTANCE = 1.2                        # how far in front of the eyes it hangs (closer than the chair in front)
+MENU_DROP = 0.2                            # how far below the eyes
 
 
 @dataclass
@@ -48,6 +56,8 @@ class Hand:
     squeeze: bool = False
     primary_pressed: bool = False         # A / X
     secondary_pressed: bool = False       # B / Y
+    menu_pressed: bool = False            # the left menu button
+    reset_pressed: bool = False           # the right thumbstick pressed down: reset the view
     stick: tuple = (0.0, 0.0)
 
     def forward(self) -> np.ndarray:
@@ -60,10 +70,12 @@ class _Inputs:
     PROFILES = {
         "/interaction_profiles/oculus/touch_controller": dict(
             select="trigger/value", squeeze="squeeze/value", stick="thumbstick", aim="aim/pose",
-            primary={"left": "x/click", "right": "a/click"}, secondary={"left": "y/click", "right": "b/click"}),
+            primary={"left": "x/click", "right": "a/click"}, secondary={"left": "y/click", "right": "b/click"},
+            menu={"left": "menu/click"}, reset={"right": "thumbstick/click"}),
         "/interaction_profiles/valve/index_controller": dict(
             select="trigger/click", squeeze="squeeze/value", stick="thumbstick", aim="aim/pose",
-            primary={"left": "a/click", "right": "a/click"}, secondary={"left": "b/click", "right": "b/click"}),
+            primary={"left": "a/click", "right": "a/click"}, secondary={"left": "b/click", "right": "b/click"},
+            reset={"right": "thumbstick/click"}),
         "/interaction_profiles/htc/vive_controller": dict(
             select="trigger/click", squeeze="squeeze/click", stick="trackpad", aim="aim/pose",
             primary={"left": "menu/click", "right": "menu/click"}, secondary={}),
@@ -95,6 +107,8 @@ class _Inputs:
         self.a_squeeze = make("squeeze", xr.ActionType.BOOLEAN_INPUT)
         self.a_primary = make("primary", xr.ActionType.BOOLEAN_INPUT)
         self.a_secondary = make("secondary", xr.ActionType.BOOLEAN_INPUT)
+        self.a_menu = make("menu", xr.ActionType.BOOLEAN_INPUT)
+        self.a_reset = make("reset", xr.ActionType.BOOLEAN_INPUT)
         self.a_stick = make("stick", xr.ActionType.VECTOR2F_INPUT)
         self.a_aim = make("aim", xr.ActionType.POSE_INPUT)
         for profile, spec in self.PROFILES.items():
@@ -125,6 +139,8 @@ class _Inputs:
             found += binding(self.a_aim, hand, spec["aim"])
             found += binding(self.a_primary, hand, spec["primary"].get(hand))
             found += binding(self.a_secondary, hand, spec["secondary"].get(hand))
+            found += binding(self.a_menu, hand, spec.get("menu", {}).get(hand))
+            found += binding(self.a_reset, hand, spec.get("reset", {}).get(hand))
         xr.suggest_interaction_profile_bindings(instance, xr.InteractionProfileSuggestedBinding(
             interaction_profile=xr.string_to_path(instance, profile),
             count_suggested_bindings=len(found), suggested_bindings=(xr.ActionSuggestedBinding * len(found))(*found)))
@@ -150,6 +166,10 @@ class _Inputs:
             hand.primary_pressed = prim and changed
             sec, changed = boolean(self.a_secondary)
             hand.secondary_pressed = sec and changed
+            menu, changed = boolean(self.a_menu)
+            hand.menu_pressed = menu and changed
+            reset, changed = boolean(self.a_reset)
+            hand.reset_pressed = reset and changed
             stick = xr.get_action_state_vector2f(ctx.session, xr.ActionStateGetInfo(action=self.a_stick, subaction_path=path))
             if stick.is_active:
                 hand.stick = (float(stick.current_state.x), float(stick.current_state.y))
@@ -187,6 +207,19 @@ def _prefer_srgb_swapchain() -> None:
     OpenGLGraphics.select_color_swapchain_format = staticmethod(select)
 
 
+NO_HEADSET = ("No VR headset was found. Please connect your headset (on a Quest: start Link or Air Link and "
+              "wake the headset), then try again.")
+
+
+def friendly_error(error: BaseException) -> str:
+    """A person-sized message for a session that could not start. A runtime with no headset behind it answers
+    XR_ERROR_FORM_FACTOR_UNAVAILABLE when the system is requested: that is "plug it in", not a bug."""
+    text = f"{type(error).__name__} {error}".lower().replace("_", "")
+    if "formfactorunavailable" in text or "runtimeunavailable" in text:
+        return NO_HEADSET
+    return f"{type(error).__name__}: {error}"
+
+
 class VRSession(QObject):
     """Owns the headset thread. Create it, call :meth:`start`, and watch the signals."""
 
@@ -195,6 +228,7 @@ class VRSession(QObject):
     started = Signal()                      # the loop is running and drawing
     failed = Signal(str)
     stopped = Signal()
+    menu_action = Signal(object)            # something the menu asked for that the window must do: video, volume, exit
 
     def __init__(self, media: VRMedia, parent: QObject | None = None) -> None:
         super().__init__(parent)
@@ -219,6 +253,11 @@ class VRSession(QObject):
         self._rig = np.eye(4)                             # headset space -> room (see geometry.rig_to_seat)
         self._lights = LightFader()
         self._seat_armed = True
+        self.menu = Menu()
+        self._panel: np.ndarray | None = None             # where the menu hangs in the room, while it is open
+        self._menu_uploaded = -1
+        self._replace_panel = False                       # the person moved: hang the menu in front of them again
+        self._welcomed = False                            # the first-time card has been shown
 
     # -- control from the UI thread ---------------------------------------------------------------
 
@@ -281,7 +320,7 @@ class VRSession(QObject):
         try:
             self._run()
         except Exception as error:  # noqa: BLE001 - reported, never allowed to take the app down
-            self.failed.emit(f"{type(error).__name__}: {error}")
+            self.failed.emit(friendly_error(error))
         finally:
             self.worn = False
             self.stopped.emit()
@@ -363,6 +402,7 @@ class VRSession(QObject):
             screen.floor_clearance = 0.12 if self.scene == ROOM else None    # on the room's floor, or at eye height
         if self.room is not None:
             renderer.room_light = self._lights.update(dt, media.playing, media.is_open, self.room.light_level_paused)
+        self._sync_menu(renderer, dt)
         picture = media.take_frame()
         if picture is not None:
             renderer.upload(picture, media.layout)
@@ -391,7 +431,8 @@ class VRSession(QObject):
             # the world is seen through the rig: the eye's place in the room, and the view into the room
             renderer.draw_eye(geo.view_matrix(position, quat) @ rig_inverse,
                               geo.projection_matrix(fov.angle_left, fov.angle_right, fov.angle_up, fov.angle_down),
-                              eye, tuple(geo.through_rig(self._rig, position)), screen, media.layout, self.scene, beams)
+                              eye, tuple(geo.through_rig(self._rig, position)), screen, media.layout, self.scene, beams,
+                              self._panel if self.menu.open else None)
             eye += 1
         if positions:
             self._head = (np.mean(np.array(positions), axis=0), orientation)
@@ -401,6 +442,8 @@ class VRSession(QObject):
                 self._recentre.clear()
                 screen.recentre(*self._head)
                 self._placed = True
+                self._replace_panel = True
+            self._menu_after_move()
 
     def _sit(self, head: tuple) -> None:
         """Move the person onto the chosen seat (or back onto it, after the Recentre button)."""
@@ -413,13 +456,80 @@ class VRSession(QObject):
             return
         self._rig = geo.rig_to_seat(seat.position, seat.yaw, head[0], head[1])
         self.seat = seat.name
+        self._replace_panel = True
+
+    # -- the menu ---------------------------------------------------------------------------------
+
+    def _sync_menu(self, renderer: Renderer, dt: float) -> None:
+        """Keep the menu's words in step with the player, and put its picture on the GPU when it changed."""
+        media, menu = self.media, self.menu
+        seat = self.room.seat(self.seat) if self.room is not None and self.seat else None
+        menu.sync(playing=media.playing, title=media.path.stem if media.is_open and media.path else "",
+                  has_media=media.is_open, has_lights=self.room is not None, seat_label=seat.label if seat else "",
+                  has_seats=self.room is not None and len(self.room.seats) > 1)
+        menu.tick(dt)
+        if menu.open:
+            image = menu.image()
+            if menu.version != self._menu_uploaded:
+                width, height = image.width(), image.height()
+                pixels = np.frombuffer(bytes(image.constBits()), np.uint8).reshape(height, image.bytesPerLine() // 4, 4)
+                renderer.set_panel_image(pixels[:, :width])
+                self._menu_uploaded = menu.version
+
+    def _place_panel(self) -> None:
+        """Hang the menu in front of where the person is now looking, in the room's own space."""
+        position, orientation = self._head
+        forward = geo.quat_to_matrix(tuple(orientation)) @ np.array([0.0, 0.0, -1.0])
+        self._panel = geo.panel_matrix(geo.through_rig(self._rig, position),
+                                       geo.direction_through_rig(self._rig, forward), MENU_WIDTH, MENU_ASPECT,
+                                       MENU_DISTANCE, MENU_DROP)
+        self._replace_panel = False
+
+    def _toggle_menu(self) -> None:
+        if self.menu.open:
+            self.menu.close()
+        else:
+            self._place_panel()
+            self.menu.show("main")
+
+    def _menu_after_move(self) -> None:
+        """Once the head is tracked and the person is seated: the first-time card; and follow them to a new seat."""
+        ready = self.seat is not None if self.room is not None else self._placed
+        if self._replace_panel and self.menu.open and ready:
+            self._place_panel()
+        self._replace_panel = False
+        if not self._welcomed and self.worn and ready:
+            self._welcomed = True
+            self._place_panel()
+            self.menu.show("videos" if self.menu.tiles and not self.media.is_open else "help", auto_close=True)
+
+    def set_videos(self, tiles: list) -> None:
+        """The Library, as shown on the menu's Videos page (any thread; replaced as a whole)."""
+        self.menu.set_tiles(tiles)
+
+    def _apply(self, action: tuple | None) -> None:
+        """Do what a menu button asked: the headset's own things here, the rest through ``menu_action``."""
+        if not action:
+            return
+        kind = action[0]
+        if kind == "lights":
+            self._lights.mode = action[1]
+        elif kind == "seat":
+            self.step_seat(action[1])
+        elif kind == "recentre":
+            self._recentre.set()
+        elif kind == "play":
+            self._toggle.set()
+        elif kind != "close":
+            self.menu_action.emit(action)                       # "video", "volume", "exit": the window's business
 
     def _controls(self, hands: dict, dt: float) -> tuple:
         """Act on the controllers; returns the pointer beams to draw."""
-        media, screen = self.media, self.screen
+        media, screen, menu = self.media, self.screen, self.menu
         beams = []
         right, left = hands.get("right"), hands.get("left")
         dt = min(dt, 0.1)
+        hover, presses = None, []
         for name, hand in hands.items():
             if not hand.valid:
                 continue
@@ -427,13 +537,28 @@ class VRSession(QObject):
             direction = geo.direction_through_rig(self._rig, hand.forward())
             hit = geo.ray_hits_screen(screen, origin, direction)
             length = hit[0] if hit else 2.5
-            beams.append((origin, direction, length, BEAM_HIT if hit else BEAM_IDLE))
-            if hand.select_pressed and hit:
+            on_menu = False
+            if menu.open and self._panel is not None:
+                where = geo.ray_hits_matrix(self._panel, origin, direction)
+                if where is not None and (hit is None or where[0] < hit[0]):
+                    on_menu, length = True, where[0]                      # the menu is nearer than the screen: it gets the pointer
+                    button = menu.hit(where[1], where[2])
+                    hover = button or hover
+                    if hand.select_pressed and button:
+                        presses.append(button)
+            beams.append((origin, direction, length, BEAM_HIT if (hit or on_menu) else BEAM_IDLE))
+            if hand.select_pressed and hit and not on_menu:
                 self._toggle.set()
             if screen.fixed is None:
                 self._drag(name, hand)
-            if hand.secondary_pressed:
-                self._recentre.set()
+        if menu.open:
+            menu.set_hover(hover)
+        for button in presses:
+            self._apply(menu.press(button))
+        if any(h.menu_pressed or h.secondary_pressed for h in hands.values()):
+            self._toggle_menu()
+        if any(h.reset_pressed for h in hands.values()):
+            self._recentre.set()                                 # right thumbstick pressed: sit back / screen back in front
         if any(h.primary_pressed for h in hands.values()):
             self._toggle.set()
         if self._toggle.is_set():
@@ -441,10 +566,10 @@ class VRSession(QObject):
             media.toggle()                                       # QObject methods are safe to call: Qt queues the work
         if right and self.room is not None:
             self._seat_with(right.stick[0])                          # right stick sideways: the next or previous seat
-        if right and abs(right.stick[1]) > 0.15:
+        if right and self.room is None and abs(right.stick[1]) > 0.15:
             screen.resize(1.0 + right.stick[1] * 0.9 * dt)
         if left:
-            if abs(left.stick[1]) > 0.15:
+            if self.room is None and abs(left.stick[1]) > 0.15:
                 screen.push(-left.stick[1] * 1.6 * dt)
             self._seek_with(left.stick[0])
         return tuple(beams)

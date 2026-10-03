@@ -47,6 +47,9 @@ class FakeMedia(QObject):
         self.muted_state = muted
         self.calls.append(("muted", muted))
 
+    def set_volume(self, volume):
+        self.calls.append(("volume", volume))
+
     def close(self, wait=False):
         self.is_open = False
         self.calls.append("close")
@@ -56,10 +59,14 @@ class FakeSession(QObject):
     worn_changed = Signal(bool)
     failed = Signal(str)
     stopped = Signal()
+    menu_action = Signal(object)
 
     def __init__(self, media, parent=None):
         super().__init__(parent)
-        self.media, self.running, self.rooms, self.seats = media, False, [], []
+        self.media, self.running, self.rooms, self.seats, self.videos = media, False, [], [], []
+
+    def set_videos(self, tiles):
+        self.videos = list(tiles)
 
     def start(self):
         self.running = True
@@ -151,3 +158,21 @@ def test_seats_are_passed_to_the_session(vr):
     vr.seats_changed.connect(seen.append)
     vr.set_seat("Seat_A")
     assert vr.session.seats == ["Seat_A"] and vr.seat_names() == [("Seat_A", "A")]
+
+
+def test_the_menus_requests_are_carried_out(vr):
+    from ultimate_video_3d.vr.menu import Tile
+
+    vr.set_videos([Tile("A film", "a_film.mp4", "sbs_half")])                  # given before the headset starts...
+    vr.show(Path("first.mp4"), "sbs_half")
+    assert [t.title for t in vr.session.videos] == ["A film"]                     # ...and handed over when it does
+    vr.set_videos([Tile("B", "b.mp4"), Tile("C", "c.mp4")])
+    assert len(vr.session.videos) == 2                                            # and kept current afterwards
+    vr.session.worn_changed.emit(True)
+    vr.media.calls.clear()
+    vr.session.menu_action.emit(("video", Tile("B", "b.mp4", "tb_half")))
+    assert vr.media.opened[0] == Path("b.mp4") and vr.media.opened[1] == "tb_half" and "play" in vr.media.calls
+    vr.session.menu_action.emit(("volume", 0.4))
+    assert ("volume", 0.4) in vr.media.calls
+    vr.session.menu_action.emit(("exit",))
+    assert not vr.session.running and vr.state == "off"

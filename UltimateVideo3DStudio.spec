@@ -26,8 +26,17 @@ datas = [
 # dev checkout, would double the download for a 25% slower model.
 datas += [(str(f), "ultimate_video_3d/assets/onnx") for f in (ASSETS / "onnx").glob("*.fp16.onnx")]
 datas += collect_data_files("onnxruntime")
+if IS_WIN:
+    # The OpenXR loader (not the API-layer demos next to it) and GLFW's DLL, for the VR player.
+    datas += collect_data_files("xr", includes=["library/win32/*", "library/windows_x86_64/*",
+                                                "api_layer/win32/*", "api_layer/windows/*", "api_layer/windows_x86_64/*"])
+    datas += collect_data_files("glfw", includes=["**/*.dll"])
 
 hiddenimports = collect_submodules("numba") + ["psutil", "platformdirs"]
+if IS_WIN:
+    # pyopenxr imports its platform sub-package by name at start-up (xr.api_layer.windows_x86_64), which the analysis
+    # cannot see: without every submodule the frozen app says "VR component 'xr' could not be loaded".
+    hiddenimports += ["glfw", "OpenGL", "OpenGL.GL", "OpenGL.platform.win32"] + collect_submodules("xr")
 
 # Nothing here needs these; leaving them out keeps the bundle small.
 excludes = [
@@ -69,7 +78,7 @@ if IS_MAC:
         bundle_identifier="app.ultimatevideo3d.studio",
         info_plist={
             "CFBundleDisplayName": "Ultimate Video to 3D Studio",
-            "CFBundleShortVersionString": "0.1.0",
+            "CFBundleShortVersionString": "0.2.0",
             "NSHighResolutionCapable": True,
             "NSHumanReadableCopyright": "Free to use",
         },

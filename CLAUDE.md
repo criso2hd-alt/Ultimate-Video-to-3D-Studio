@@ -76,8 +76,9 @@ Things that each cost a debugging session:
   It reads `api.github.com/.../releases/latest`, which needs a *public* repo; a private one
   quietly yields "no update". Every failure is silent.
 - **First-run welcome + spotlight tutorial** (`onboarding.py`, copied in look and behaviour from the
-  DLSS app): a welcome dialog, then a dimmed window with one real control lit at a time (12 steps; the
-  side-rail steps scroll the rail via `TourStep.prepare`, the Settings step switches tab). Offered once
+  DLSS app): a welcome dialog, then a dimmed window with one real control lit at a time (15 steps since 0.2.0; the
+  side-rail steps scroll the rail via `TourStep.prepare`, the Library / Watch in VR / Settings steps switch tab).
+  `ONBOARDING_VERSION` is 2: everyone who saw the 0.1 tour is offered the new one once. Offered once
   (`settings.onboarding_version` vs `ONBOARDING_VERSION`), only after the first-launch encoder probe
   has finished, and replayable from Settings > Help. It never changes a setting. Tests and harnesses
   set `UV3D_SKIP_TOUR=1` (see `tests/conftest.py`) - a fresh settings file would otherwise pop a modal
@@ -278,6 +279,19 @@ Baking lessons (all hit for real): `smart_project(correct_aspect=True)` reads th
 scale); the first unwrap in a Blender session packs badly, so retry on low coverage; the owner's file was saved with an object
 in Edit Mode, which breaks `transform_apply` (go to Object Mode first); a background command over 10 minutes is killed, so
 bake per group/state and persist each group's UVs (`uv_<group>.npz`) so a later export matches every bake.
+**The menu in the headset** (`vr/menu.py`, `Menu`): a 1280x800 panel painted with QPainter into a QImage (no GL in the
+class, so it is tested without a headset), put on a textured quad by `renderer.draw_eye(..., panel=)` and hung 1.5 m in front
+of the person, 20 cm below the eyes, tilted up (`geometry.panel_matrix`). Pages: `help` (shows by itself the first time the
+headset is worn and closes after 16 s, or `videos` instead if nothing is playing and the Library has entries), `main` (Play,
+Videos, Help, Lights Auto/On/Off, Seat, Volume, Reset view, Leave VR), `videos` (3x2 thumbnails a page). Open/close:
+left menu button or B/Y. **Right thumbstick press = reset the view** (`Hand.reset_pressed`, the `reset` action in `_Inputs`).
+The pointer ray goes to whichever is nearer, panel or screen; the trigger on the panel presses the hovered button, so a menu
+click never also toggles play. `Menu.press` returns action tuples; `session._apply` does the headset's own (lights mode on
+`LightFader.mode`, seat, recentre, play) and emits `menu_action` for the window's (`video`, `volume`, `exit`), which
+`VRController._on_menu_action` carries out. The Library reaches the headset as `Tile`s via `MainWindow._push_vr_videos`
+(on Play in VR, after a conversion, and on every tab change). The Play in VR button is always shown and fades out, with the
+reason as its tooltip, when `vr.unavailable_reason()` is non-empty; a runtime with no headset behind it (XR
+FORM_FACTOR_UNAVAILABLE) becomes "Please connect your VR headset" in a box (`session.friendly_error`, `MainWindow._vr_failed`).
 Not yet checked: SteamVR and Virtual Desktop runtimes (`XR_RUNTIME_JSON=<json>` selects one for a single process
 without touching the system setting).
 The runtime prints a lot of its own log to stdout: never parse stdout for results.

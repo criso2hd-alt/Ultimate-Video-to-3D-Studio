@@ -675,6 +675,7 @@ class SettingsPage(QWidget):
         cards.append(help_card)
 
         vr_card = ModuleCard("Virtual reality")
+        self.vr_card = vr_card
         self.vr_status = QLabel("")
         self.vr_status.setObjectName("hint")
         self.vr_status.setWordWrap(True)
@@ -775,7 +776,11 @@ class MainWindow(QMainWindow):
         self.library_page.message.connect(lambda text: self.status.showMessage(text))
         self.vr = VRController(self)
         self.vr.notice.connect(lambda text: self.status.showMessage(text))
-        self.library_page.set_vr_available(VRController.available())
+        from .vr import unavailable_reason
+
+        reason = unavailable_reason()
+        self.library_page.set_vr_available(not reason, reason)
+        self.vr.failed.connect(self._vr_failed)
         self.library_page.vr_requested.connect(self._play_in_vr)
         self.library_page.space_hook = self._space_for_vr
         QApplication.instance().installEventFilter(self)
@@ -1208,8 +1213,9 @@ class MainWindow(QMainWindow):
             step("Pick a view",
                  "2D is the plain video. Output, Anaglyph and Side by side show the 3D the way it will be "
                  "delivered. Wiggle, Depth, Parallax and Holes let you check the 3D without any glasses, "
-                 "and 3D orbit flies a camera around the depth as geometry. Picking a 3D view is what "
-                 "turns the effect on.",
+                 "and 3D orbit flies a camera around the depth as geometry. Zones paints the picture by "
+                 "how far each part sticks out of or sinks into the screen, so you can see what is too much "
+                 "for comfortable viewing. Picking a 3D view is what turns the effect on.",
                  page.mode_bar, video),
             step("Timeline",
                  "Drag to scrub. While a 3D view is chosen the app keeps rendering ahead in the "
@@ -1219,14 +1225,17 @@ class MainWindow(QMainWindow):
                  page.timeline, video),
             step("Source",
                  "Choose the video file to convert, and where the result is saved; the name is filled in "
-                 "for you, e.g. name_SBS.mp4. Converting your own DVDs and Blu-rays straight from an "
-                 "external drive is coming in a later version - that button is a placeholder for now.",
+                 "for you, e.g. name_SBS.mp4. \"Choose external disc\" reads a DVD or Blu-ray you own from a "
+                 "drive: copy a title to disk first, or convert straight from the disc without keeping a copy. "
+                 "Copy-protected discs are not supported - the app tells you when it meets one.",
                  page.source_card, lambda: self._reveal(page.source_card)),
             step("3D conversion",
                  "Output is the format: Side-by-Side and Top-and-Bottom (half or full), red-cyan "
                  "Anaglyph, or Colour + Depth. 3D strength is how deep it feels; Depth position sets what "
-                 "sits in front of the screen and what behind it. Advanced adds foreground and background "
-                 "depth, depth stability and softening, edge snapping, and a left/right swap.",
+                 "sits in front of the screen and what behind it. Depth cleanup smooths the depth map "
+                 "for exports (standard, smooth or smoother). Advanced adds foreground and background depth, "
+                 "depth stability and softening, edge snapping, and a left/right swap. The gauge and the "
+                 "marks on the sliders show how much of the picture lands in the comfortable zone.",
                  page.threed, lambda: self._reveal(page.threed)),
             step("Professional colour correction",
                  "Tick to enable, click to open. The controls a colourist expects: temperature and tint, "
@@ -1245,14 +1254,29 @@ class MainWindow(QMainWindow):
                  page.export, lambda: self._reveal(page.export)),
             step("Convert",
                  "Convert video runs the whole clip with the settings above, on your GPU, and shows "
-                 "progress and time left. Convert several... queues a list of videos back to back with "
-                 "the same settings.",
+                 "progress and time left. Press Pause to stop whenever you like - nothing already encoded "
+                 "is lost, and converting the same video again offers to continue where it stopped. "
+                 "Convert several... queues a list of videos back to back with the same settings.",
                  page.start, video),
             step("Your hardware",
                  "Live GPU, video-encoder, memory and CPU load while you work, and the video encoder "
                  "chosen for this computer. It works on NVIDIA, AMD and Intel graphics alike - no CUDA "
                  "needed.",
                  self.gauge, video),
+            step("Library",
+                 "Every video you convert lands here, with a thumbnail. Click one to watch it in the "
+                 "original layout or as red-cyan anaglyph, add videos you already have with Add videos, "
+                 "and remove one with Delete (it goes to the Recycle Bin, not away for good).",
+                 self.library_page, lambda: self.tabs.setCurrentWidget(self.library_page)),
+            step("Watch in VR",
+                 "With a VR headset (Quest via Link or Virtual Desktop, SteamVR, or anything that speaks "
+                 "OpenXR) the Library gets a Play in VR button: the video appears on a big screen in a home "
+                 "theatre and the lights dim by themselves when it plays. Inside, a card shows what every "
+                 "button does, and the menu (left menu button, or B / Y) lets you pick another video, set "
+                 "the lights, change seat, turn the volume and leave. Pressing the right stick resets the "
+                 "view. Choose the room here - without one you get a plain room. The headset is "
+                 "optional; everything else works without it.",
+                 self.settings_page.vr_card, lambda: self._reveal_setting(self.settings_page.vr_card)),
             step("Settings",
                  "Preview size and smoothness, how far ahead to buffer, appearance, update checks and "
                  "folders live here - and this is where you can replay the tutorial.",
@@ -1266,6 +1290,13 @@ class MainWindow(QMainWindow):
                 "everyone, for good. (The X hides this strip until you next open the app.)",
                 self.banner, video))
         return steps
+
+    def _reveal_setting(self, card: QWidget) -> None:
+        """Show the Settings tab with one of its cards in view."""
+        self.tabs.setCurrentWidget(self.settings_page)
+        scroller = self.settings_page.findChild(QScrollArea)
+        if scroller is not None:
+            scroller.ensureWidgetVisible(card, 0, 40)
 
     def start_tutorial(self) -> None:
         """Spotlight the real controls in the order of a first conversion."""
@@ -1765,9 +1796,10 @@ class MainWindow(QMainWindow):
 
     def _refresh_vr_settings(self) -> None:
         sp = self.settings_page
-        sp.vr_status.setText("A VR headset can be used on this computer." if VRController.available() else
-                             "VR needs Windows, an OpenXR runtime (Meta Link, SteamVR or Virtual Desktop) and the VR "
-                             "components; none was found.")
+        from .vr import unavailable_reason
+
+        reason = unavailable_reason()
+        sp.vr_status.setText("A VR headset can be used on this computer." if not reason else reason)
         room = self._vr_room_dir()
         sp.vr_room_label.setText(f"Room: {room}" if room else "Room: the plain built-in room.")
 
@@ -1785,8 +1817,30 @@ class MainWindow(QMainWindow):
         self.settings.vr_room_dir = ""
         self._refresh_vr_settings()
 
+    def _vr_failed(self, message: str) -> None:
+        """The headset session could not start or stopped: say so in a box (a status-bar line is too easy to miss)."""
+        QMessageBox.information(self, "VR headset", message)
+
+    def _push_vr_videos(self) -> None:
+        """Give the headset's menu the Library, newest first, so a video can be picked without taking the headset off."""
+        if self.vr is None or not self.library_page._vr_available:
+            return
+        from PySide6.QtGui import QImage
+
+        from .vr.menu import Tile
+
+        tiles = []
+        for entry in self.library.entries[:60]:
+            if entry.missing:
+                continue
+            thumb = self.library.thumb_path(entry)
+            picture = QImage(str(thumb)) if thumb.is_file() else None
+            tiles.append(Tile(entry.title, entry.path, entry.layout, entry.detail, picture))
+        self.vr.set_videos(tiles)
+
     def _play_in_vr(self, entry) -> None:
         """Show a Library video in the headset, in the chosen room."""
+        self._push_vr_videos()
         if not self.vr.available() and self.vr.session is None:
             QMessageBox.information(self, "VR is not available", self.settings_page.vr_status.text())
             return
@@ -1819,10 +1873,12 @@ class MainWindow(QMainWindow):
             layout = self.settings.threed.layout if self.settings.threed.enabled else ""
             self.library.add_converted(Path(output), layout, source_name)
             self.library_page.refresh()
+            self._push_vr_videos()
         except Exception:  # noqa: BLE001 - the Library is a convenience; a finished video is never lost to it
             pass
 
     def _tab_changed(self, index: int) -> None:
+        self._push_vr_videos()                           # additions and removals are made in the Library tab
         if self.tabs.widget(index) is not self.library_page:
             self.library_page.pause()                    # leaving the Library stops its video
 

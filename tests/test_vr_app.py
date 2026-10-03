@@ -57,6 +57,9 @@ class FakeVR:
     def toggle(self):
         self.calls.append("toggle")
 
+    def set_videos(self, tiles):
+        self.calls.append(("videos", len(tiles)))
+
     def stop(self):
         self.calls.append("stop")
 
@@ -81,12 +84,13 @@ def clip(tmp_path):
     return path
 
 
-def test_the_library_offers_play_in_vr_only_when_a_headset_can_be_used(win, clip):
+def test_the_library_fades_play_in_vr_out_when_vr_cannot_work_here(win, clip):
     page = win.library_page
     page.add_files([clip])
     page.grid.setCurrentRow(0)
-    page.set_vr_available(False)
-    assert page.vr_button.isHidden()
+    page.set_vr_available(False, "No OpenXR runtime is installed.")
+    assert not page.vr_button.isHidden() and not page.vr_button.isEnabled()    # always there, faded out
+    assert "OpenXR runtime" in page.vr_button.toolTip()                        # and it says why
     page.set_vr_available(True)
     assert not page.vr_button.isHidden() and page.vr_button.isEnabled()
     page.set_vr_available(True)
@@ -107,7 +111,8 @@ def test_play_in_vr_pauses_the_local_player_and_hands_the_video_to_the_window(wi
     assert len(asked) == 1 and asked[0].file == clip
     win._play_in_vr(asked[0])
     assert ("show", "film_SBS.mp4", "sbs_half", False) in win.vr.calls
-    assert win.vr.calls[0][0] == "use_room"                                    # the room is chosen first
+    kinds = [c[0] if isinstance(c, tuple) else c for c in win.vr.calls]
+    assert "videos" in kinds and kinds.index("use_room") < kinds.index("show")      # the Library and the room are set first
 
 
 def test_space_goes_to_the_headset_when_one_is_playing_and_not_otherwise(win):
@@ -165,3 +170,18 @@ def test_the_chosen_room_is_saved_and_comes_back_after_a_restart(tmp_path):
     settings.vr_room_dir = "D:/rooms/theatre"
     settings.save(tmp_path / "s.json")
     assert AppSettings.load(tmp_path / "s.json").vr_room_dir == "D:/rooms/theatre"
+
+
+def test_a_missing_headset_is_reported_as_please_connect_it(win, monkeypatch):
+    from ultimate_video_3d.vr import session as sessionmod
+
+    class FormFactorUnavailable(Exception):
+        pass
+
+    assert sessionmod.friendly_error(FormFactorUnavailable("XR_ERROR_FORM_FACTOR_UNAVAILABLE")) == sessionmod.NO_HEADSET
+    assert "connect" in sessionmod.NO_HEADSET.lower()
+    assert sessionmod.friendly_error(ValueError("boom")) == "ValueError: boom"        # anything else keeps its detail
+    shown = []
+    monkeypatch.setattr(appmod.QMessageBox, "information", lambda *a: shown.append(a[2]))
+    win._vr_failed(sessionmod.NO_HEADSET)
+    assert shown == [sessionmod.NO_HEADSET]

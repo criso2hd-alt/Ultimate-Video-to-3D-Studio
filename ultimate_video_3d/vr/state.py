@@ -13,8 +13,14 @@ class LightFader:
     def __init__(self, level: float = 1.0, seconds_for_full_fade: float = 1.4) -> None:
         self.level = level
         self._rate = 1.0 / max(seconds_for_full_fade, 0.1)
+        #: "auto" follows the film; "on" and "off" are the person's own choice and hold until they change it.
+        self.mode = "auto"
 
     def target(self, playing: bool, has_media: bool, paused_level: float) -> float:
+        if self.mode == "on":
+            return 1.0
+        if self.mode == "off":
+            return 0.0
         if not has_media:
             return 1.0
         return 0.0 if playing else paused_level

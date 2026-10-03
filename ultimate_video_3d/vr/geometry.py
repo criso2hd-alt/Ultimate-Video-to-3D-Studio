@@ -206,7 +206,11 @@ def ray_hits_screen(screen: Screen, origin, direction) -> tuple[float, float, fl
     None if it misses, points away, or is parallel. The screen is treated as flat; a mild curve changes the hit
     point by a few centimetres at the edges, which does not matter for pointing.
     """
-    model = screen.physical_matrix()
+    return ray_hits_matrix(screen.physical_matrix(), origin, direction)
+
+
+def ray_hits_matrix(model: np.ndarray, origin, direction) -> tuple[float, float, float] | None:
+    """Where a ray meets a unit quad placed by ``model`` (unit quad -> world): (metres, u, v), u and v from its top left."""
     inverse = np.linalg.inv(model)
     o = (inverse @ np.append(np.asarray(origin, np.float64), 1.0))[:3]
     d = (inverse @ np.append(np.asarray(direction, np.float64), 0.0))[:3]
@@ -222,6 +226,21 @@ def ray_hits_screen(screen: Screen, origin, direction) -> tuple[float, float, fl
     world = np.asarray(origin, np.float64) + np.asarray(direction, np.float64) * t
     metres = float(np.linalg.norm(world - np.asarray(origin, np.float64)))
     return metres, x + 0.5, 0.5 - y
+
+
+def panel_matrix(head_position, forward, width: float, aspect: float, distance: float = 1.5, drop: float = 0.2) -> np.ndarray:
+    """A floating panel in front of a person: ``distance`` ahead along ``forward`` (a direction; only its heading is
+    used), ``drop`` below their eyes, turned to face them and tilted up toward their eyes. Unit quad -> world."""
+    heading = math.atan2(-forward[0], -forward[2])
+    tilt = math.atan2(drop, distance)
+    c, s = math.cos(-tilt), math.sin(-tilt)
+    pitch = np.eye(4)
+    pitch[1, 1], pitch[1, 2], pitch[2, 1], pitch[2, 2] = c, -s, s, c
+    m = yaw_matrix(heading) @ pitch
+    centre = np.asarray(head_position, np.float64) + yaw_matrix(heading)[:3, :3] @ np.array([0.0, 0.0, -distance])
+    centre[1] = head_position[1] - drop
+    m[:3, 3] = centre
+    return m @ np.diag([width, width / aspect, 1.0, 1.0])
 
 
 # --- sitting in a room ----------------------------------------------------------------------------------
