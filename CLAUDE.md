@@ -300,6 +300,15 @@ to wherever they were looking. Meta's own Meta-button+trigger screenshot does no
 Screenshot button: it closes the menu, waits `SHOT_DELAY` (3 s), reads the LEFT eye image straight out of the swapchain
 framebuffer (`session._save_eye_view`, menu and rays hidden for that frame) and saves a PNG to Pictures/Ultimate Video to 3D Studio
 (`paths.screenshots_dir`), then reopens the menu with a note. The seat < > buttons in the menu still step through the list.
+**The projector (planned beam effect).** The owner's room gets a ceiling-hung projector. In Blender: a `Projector` box (stand-in until they
+model it) on a thin `Projector_Mount` pole through the centre slot between the acoustic panels, and an empty `Projector_Lens`
+(arrow pointing at the screen) at the lens, in collection `06_PROJECTOR`; a wire `BeamGuide_TEMP` shows the beam's outline in
+the viewport (delete it, it is hide_render). `scripts/blender/place_projector.py` found the spot by testing 231 rays from the
+lens to the whole screen against all geometry (lens (0, -7.0, 4.155), throw 6.96 m = ratio 1.34, body hanging below the panels,
+pole through the slot at y = -7.1). The new file is `docs/room-template/room_template_projector.blend` (ignored by git like the
+other room_template*.blend). Runtime beam, not built yet: a four-sided additive pyramid from the lens to the picture's corners
+(so it narrows for letterboxed films), brightness/tint from the picture, only while playing with the lights down, soft edges, a
+slow noise shimmer; the app needs nothing from the model but the `Projector_Lens` position.
 **Pointer rays are drawn last, on top, without depth test** (`renderer.draw_eye`, 5-element tuples (origin, direction, length,
 colour, landed) with a dot at the tip when `landed`). Depth-tested they were hidden piecemeal by chair backs and the console and
 looked "cut in half and shifted" in the headset; the menu panel also showed them ghosting through it. Reproduce without a

@@ -26,7 +26,7 @@ crash.log
 settings.json
 
 # The owner's working Blender room (it contains a third-party chair model: never commit it) and Blender backups
-docs/room-template/room_template.blend
+docs/room-template/room_template*.blend
 docs/room-template/*.blend1
 docs/room-template/*backup*.blend
 docs/room-template/Textures/
