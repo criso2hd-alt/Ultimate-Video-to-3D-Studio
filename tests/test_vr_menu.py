@@ -380,3 +380,144 @@ def test_the_lights_choice_reaches_the_fader_and_a_seat_change_follows_the_perso
     session._placed = True
     session._menu_after_move()
     assert session._panel[0, 3] == pytest.approx(2.0, abs=0.01)
+
+
+# --- choosing a seat with the right stick -------------------------------------------------------------------------------
+
+
+def grid_seats():
+    """Three rows by three seats facing the screen (-z), 1.4 m between rows and 0.95 m between seats; row 1 is nearest the screen."""
+    seats = []
+    for row in (1, 2, 3):
+        for col, label in ((-1, "Left"), (0, "Centre"), (1, "Right")):
+            seats.append((f"Seat_R{row}_{label}", (col * 0.95, 1.1, 2.0 + row * 1.4), 0.0))
+    return seats
+
+
+def test_pushing_the_stick_goes_to_the_seat_that_way():
+    from ultimate_video_3d.vr.state import pick_seat
+
+    seats = grid_seats()
+    assert pick_seat(seats, "Seat_R2_Centre", (0.0, 1.0)) == "Seat_R1_Centre"            # forward: the seat in front (nearer the screen)
+    assert pick_seat(seats, "Seat_R2_Centre", (0.0, -1.0)) == "Seat_R3_Centre"           # back: the seat behind
+    assert pick_seat(seats, "Seat_R2_Centre", (1.0, 0.0)) == "Seat_R2_Right"             # right: the seat on your right
+    assert pick_seat(seats, "Seat_R2_Centre", (-1.0, 0.0)) == "Seat_R2_Left"
+    assert pick_seat(seats, "Seat_R3_Left", (0.3, 1.0)) == "Seat_R2_Left"                # mostly forward: straight ahead, not the diagonal
+    assert pick_seat(seats, "Seat_R2_Centre", (0.8, 0.8)) in ("Seat_R2_Right", "Seat_R1_Centre", "Seat_R1_Right")   # a diagonal picks a neighbour that way
+
+
+def test_there_is_nothing_to_go_to_past_the_last_seat_and_a_stick_at_rest_does_nothing():
+    from ultimate_video_3d.vr.state import pick_seat
+
+    seats = grid_seats()
+    assert pick_seat(seats, "Seat_R1_Centre", (0.0, 1.0)) is None                        # nothing nearer the screen
+    assert pick_seat(seats, "Seat_R3_Right", (1.0, 0.0)) is None                         # no seat further right
+    assert pick_seat(seats, "Seat_R2_Centre", (0.0, 0.0)) is None
+    assert pick_seat(seats, "no such seat", (0.0, 1.0)) is None
+
+
+def test_stick_directions_follow_the_way_the_seat_faces():
+    from ultimate_video_3d.vr.state import pick_seat
+
+    # the same room turned to face +x (yaw -90 degrees): the screen is now along +x, so the right-hand side is toward +z
+    turned = [(n, (-(p[2]), p[1], p[0]), -np.pi / 2) for n, p, _ in grid_seats()]
+    assert pick_seat(turned, "Seat_R2_Centre", (0.0, 1.0)) == "Seat_R1_Centre"           # forward is still toward the screen
+    assert pick_seat(turned, "Seat_R2_Centre", (1.0, 0.0)) == "Seat_R2_Right"            # and right is still the person's right
+
+
+class _FakeRoom:
+    def __init__(self, seats):
+        from ultimate_video_3d.vr.room import Seat
+
+        self.seats = [Seat(n, n, np.array(p, float), y) for n, p, y in seats]
+
+    def seat(self, name):
+        return next((s for s in self.seats if s.name == name), None)
+
+
+def test_changing_seat_keeps_the_way_the_person_is_turned_and_reset_faces_them_to_the_screen(session):
+    from ultimate_video_3d.vr.state import SeatCycle
+
+    seats = grid_seats()
+    session.room = _FakeRoom(seats)
+    session._seats = SeatCycle([s[0] for s in seats])
+    head = np.array([0.1, 1.1, -0.2])
+    looking_aside = (0.0, np.sin(0.5), 0.0, np.cos(0.5))                                  # head turned about 57 degrees
+    session._pending_seat = "Seat_R2_Centre"
+    session._sit((head, looking_aside))
+    first = session._rig.copy()
+    forward = geo.quat_to_matrix(looking_aside) @ np.array([0, 0, -1.0])
+    ahead = geo.direction_through_rig(first, forward)
+    assert np.allclose(ahead[[0, 2]] / np.linalg.norm(ahead[[0, 2]]), [0.0, -1.0], atol=1e-9)     # the first sit faces the screen
+    assert np.allclose(geo.through_rig(first, head), session.room.seat("Seat_R2_Centre").position)
+    # now the person looks somewhere else entirely and moves to the seat on the right
+    looking_elsewhere = (0.0, np.sin(-0.9), 0.0, np.cos(-0.9))
+    session._pending_seat = "Seat_R2_Right"
+    session._sit((head, looking_elsewhere))
+    second = session._rig
+    assert np.allclose(second[:3, :3], first[:3, :3])                                     # the turn is unchanged: the room did not swing
+    assert np.allclose(geo.through_rig(second, head), session.room.seat("Seat_R2_Right").position)
+    # Reset view: face the way the seat faces from wherever they are looking now
+    session._recentre.set()
+    session._sit((head, looking_elsewhere))
+    forward = geo.quat_to_matrix(looking_elsewhere) @ np.array([0, 0, -1.0])
+    ahead = geo.direction_through_rig(session._rig, forward)
+    assert np.allclose(ahead[[0, 2]] / np.linalg.norm(ahead[[0, 2]]), [0.0, -1.0], atol=1e-9)
+
+
+def test_the_right_stick_moves_one_seat_per_push_and_must_return_to_the_middle(session):
+    from ultimate_video_3d.vr.state import SeatCycle
+
+    seats = grid_seats()
+    session.room = _FakeRoom(seats)
+    session._seats = SeatCycle([s[0] for s in seats])
+    session.seat = "Seat_R2_Centre"
+    session._aim_seat((0.0, 0.5))                                                          # a half push is not a move
+    assert session._pending_seat is None
+    session._aim_seat((0.0, 1.0))
+    assert session._pending_seat == "Seat_R1_Centre"
+    session._pending_seat = None
+    session._aim_seat((0.0, 1.0))                                                          # still held: no second move
+    assert session._pending_seat is None
+    session._aim_seat((0.0, 0.0))                                                          # back to the middle re-arms it
+    session._aim_seat((1.0, 0.0))
+    assert session._pending_seat == "Seat_R2_Right"
+
+
+# --- screenshots -------------------------------------------------------------------------------------------------------
+
+
+def test_the_screenshot_button_closes_the_menu_and_takes_the_picture_a_few_seconds_later(session):
+    session._toggle_menu()
+    assert session.menu.open
+    assert click(session.menu, "screenshot") == ("screenshot",)
+    session._apply(("screenshot",))
+    assert not session.menu.open and session._shot_timer > 0                              # the menu is out of the picture
+    assert not session._shot_due(1.0) and not session._shot_due(1.0)
+    assert session._shot_due(1.5) is True                                                  # about three seconds in
+    assert session._shot_due(0.1) is False                                                 # once only
+
+
+def test_a_note_under_the_menu_buttons_fades_by_itself(qapp):
+    menu = ready()
+    menu.set_note("Screenshot saved in your Pictures folder.")
+    menu.image()
+    version = menu.version
+    menu.tick(5.0)
+    assert menu.note and menu.version == version
+    menu.tick(5.0)
+    menu.image()
+    assert menu.note == "" and menu.version == version + 1
+
+
+def test_where_screenshots_go(tmp_path, monkeypatch):
+    from ultimate_video_3d import paths
+
+    monkeypatch.setattr(paths.Path, "home", classmethod(lambda cls: tmp_path))
+    (tmp_path / "Pictures").mkdir()
+    assert paths.screenshots_dir() == tmp_path / "Pictures" / "Ultimate Video to 3D Studio"
+    monkeypatch.setattr(paths, "data_dir", lambda: tmp_path / "data")
+    (tmp_path / "data").mkdir()
+    (tmp_path / "Pictures" / "Ultimate Video to 3D Studio").rmdir()
+    (tmp_path / "Pictures").rmdir()
+    assert paths.screenshots_dir() == tmp_path / "data" / "screenshots"                  # no Pictures folder: beside the app's data

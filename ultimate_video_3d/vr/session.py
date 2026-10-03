@@ -10,8 +10,8 @@ States, as the runtime reports them: IDLE -> READY -> SYNCHRONIZED -> VISIBLE ->
 
 Controls (any OpenXR controller, bound for Touch, Index, Vive, Windows MR and the generic "simple" profile):
   trigger on the screen / A or X ...... play and pause          left menu button / B / Y ... open or close the menu
-  left stick left/right ............... back / forward 10 s      right stick left/right ..... change seat (in a room)
-  right stick PRESSED DOWN ............ reset the view: sit back in the seat / screen back in front of me
+  left stick left/right ............... back / forward 10 s      right stick, any way ....... go to the seat that way
+  right stick PRESSED DOWN ............ reset the view: face the screen from the seat / screen back in front of me
 In the plain room (no baked room): right stick up/down = screen size, left stick up/down = distance, grip = drag.
 The menu is a floating panel (see menu.py): point with a controller, pull the trigger. It also shows, by itself, the
 first time the headset goes on, so nobody has to guess what the buttons do.
@@ -34,7 +34,7 @@ from .media import VRMedia
 from .menu import ASPECT as MENU_ASPECT
 from .menu import Menu
 from .renderer import BAKED, ROOM, Renderer
-from .state import LightFader, SeatCycle
+from .state import LightFader, SeatCycle, pick_seat
 
 APP_NAME = "Ultimate Video to 3D Studio"
 SEEK_MS = 10_000
@@ -42,6 +42,7 @@ BEAM_IDLE, BEAM_HIT = (0.55, 0.6, 0.7, 0.8), (0.3, 0.85, 1.0, 1.0)
 MENU_WIDTH = 1.0                           # metres, the menu panel in the room
 MENU_DISTANCE = 1.2                        # how far in front of the eyes it hangs (closer than the chair in front)
 MENU_DROP = 0.2                            # how far below the eyes
+SHOT_DELAY = 3.0                           # seconds between pressing Screenshot and the picture (time to look at the screen)
 
 
 @dataclass
@@ -258,6 +259,9 @@ class VRSession(QObject):
         self._menu_uploaded = -1
         self._replace_panel = False                       # the person moved: hang the menu in front of them again
         self._welcomed = False                            # the first-time card has been shown
+        self._shot_timer = 0.0                            # counting down to a screenshot; 0 = none asked for
+        self._shot_now = False                            # this frame is the one to capture
+        self._align_next = True                           # the next sit turns the person to face the seat (first time, and Reset)
 
     # -- control from the UI thread ---------------------------------------------------------------
 
@@ -287,6 +291,7 @@ class VRSession(QObject):
     def set_room(self, room: roommod.Room | None) -> None:
         """Use a baked room (its own fixed screen, seats and lighting), or None for the plain stand-in room."""
         self.room = room
+        self._align_next = True                           # entering a room: face the way the first seat faces
         if room is None:
             self.screen, self.scene, self.seat = geo.Screen(), ROOM, None
             self._seats = SeatCycle([])
@@ -403,6 +408,7 @@ class VRSession(QObject):
         if self.room is not None:
             renderer.room_light = self._lights.update(dt, media.playing, media.is_open, self.room.light_level_paused)
         self._sync_menu(renderer, dt)
+        shooting = self._shot_due(dt)                         # this frame is the picture: no menu, no rays in it
         picture = media.take_frame()
         if picture is not None:
             renderer.upload(picture, media.layout)
@@ -431,8 +437,10 @@ class VRSession(QObject):
             # the world is seen through the rig: the eye's place in the room, and the view into the room
             renderer.draw_eye(geo.view_matrix(position, quat) @ rig_inverse,
                               geo.projection_matrix(fov.angle_left, fov.angle_right, fov.angle_up, fov.angle_down),
-                              eye, tuple(geo.through_rig(self._rig, position)), screen, media.layout, self.scene, beams,
-                              self._panel if self.menu.open else None)
+                              eye, tuple(geo.through_rig(self._rig, position)), screen, media.layout, self.scene,
+                              () if shooting else beams, self._panel if (self.menu.open and not shooting) else None)
+            if shooting and eye == 0:
+                self._save_eye_view()                         # the left eye, as drawn, straight from the swapchain image
             eye += 1
         if positions:
             self._head = (np.mean(np.array(positions), axis=0), orientation)
@@ -450,11 +458,15 @@ class VRSession(QObject):
         if self._recentre.is_set() and self.seat is not None:
             self._recentre.clear()
             self._pending_seat = self.seat
+            self._align_next = True                       # Reset view: face the way the seat faces again
         name, self._pending_seat = self._pending_seat, None
         seat = self.room.seat(name) if name else None
         if seat is None:
             return
-        self._rig = geo.rig_to_seat(seat.position, seat.yaw, head[0], head[1])
+        # Moving to another seat only moves them: they keep facing whichever way they were turned in the room. Turning them
+        # to the seat's direction every time spun the room round to wherever they happened to be looking.
+        self._rig = geo.rig_to_seat(seat.position, seat.yaw, head[0], head[1], None if self._align_next else self._rig)
+        self._align_next = False
         self.seat = seat.name
         self._replace_panel = True
 
@@ -520,6 +532,9 @@ class VRSession(QObject):
             self._recentre.set()
         elif kind == "play":
             self._toggle.set()
+        elif kind == "screenshot":
+            self.menu.close()                             # out of the picture, then a few seconds to look at the screen
+            self._shot_timer = SHOT_DELAY
         elif kind != "close":
             self.menu_action.emit(action)                       # "video", "volume", "exit": the window's business
 
@@ -566,7 +581,7 @@ class VRSession(QObject):
             self._toggle.clear()
             media.toggle()                                       # QObject methods are safe to call: Qt queues the work
         if right and self.room is not None:
-            self._seat_with(right.stick[0])                          # right stick sideways: the next or previous seat
+            self._aim_seat(right.stick)                              # right stick: go to the seat that way
         if right and self.room is None and abs(right.stick[1]) > 0.15:
             screen.resize(1.0 + right.stick[1] * 0.9 * dt)
         if left:
@@ -575,12 +590,61 @@ class VRSession(QObject):
             self._seek_with(left.stick[0])
         return tuple(beams)
 
-    def _seat_with(self, x: float) -> None:
-        if abs(x) < 0.4:
+    def _aim_seat(self, stick: tuple) -> None:
+        """Right stick: push toward a seat to go there (forward = toward the screen, right = the seat on your right...).
+        One move per push; the stick must come back to the middle before the next."""
+        magnitude = math.hypot(*stick)
+        if magnitude < 0.35:
             self._seat_armed = True
-        elif abs(x) > 0.8 and self._seat_armed:
+        elif magnitude > 0.75 and self._seat_armed and self.room is not None:
             self._seat_armed = False
-            self.step_seat(1 if x > 0 else -1)
+            name = pick_seat([(s.name, s.position, s.yaw) for s in self.room.seats], self.seat, (stick[0], stick[1]))
+            if name is not None and name != self.seat:
+                self._seats.select(name)
+                self._pending_seat = name
+
+    # -- screenshots ------------------------------------------------------------------------------
+
+    def _shot_due(self, dt: float) -> bool:
+        """True on the one frame a requested screenshot is taken (SHOT_DELAY seconds after the button)."""
+        if self._shot_timer <= 0:
+            return False
+        self._shot_timer -= max(0.0, dt)
+        if self._shot_timer > 0:
+            return False
+        self._shot_timer = 0.0
+        return True
+
+    def _save_eye_view(self) -> None:
+        """Read the eye image that was just drawn (the swapchain framebuffer is still bound) and save it as a PNG."""
+        from OpenGL import GL
+
+        from .. import paths
+
+        x, y, w, h = (int(v) for v in GL.glGetIntegerv(GL.GL_VIEWPORT))
+        GL.glPixelStorei(GL.GL_PACK_ALIGNMENT, 1)
+        data = GL.glReadPixels(x, y, w, h, GL.GL_RGB, GL.GL_UNSIGNED_BYTE)
+        image = np.frombuffer(data, np.uint8).reshape(h, w, 3)[::-1].copy()          # OpenGL rows run bottom to top
+        try:
+            path = paths.screenshots_dir() / time.strftime("VR screenshot %Y-%m-%d %H-%M-%S.png")
+        except Exception as error:  # noqa: BLE001 - no place to save is reported, not fatal
+            self.menu_action.emit(("screenshot-failed", f"{type(error).__name__}: {error}"))
+            return
+        threading.Thread(target=self._write_png, args=(path, image), name="uv3d-vr-shot", daemon=True).start()
+        self._place_panel()
+        self.menu.show("main")
+        self.menu.set_note("Screenshot saved in your Pictures folder." if path.parent.parent.name == "Pictures"
+                           else f"Screenshot saved: {path.name}")
+
+    def _write_png(self, path, rgb: np.ndarray) -> None:
+        try:
+            import cv2
+
+            if not cv2.imwrite(str(path), cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR)):
+                raise OSError("could not write the file")
+            self.menu_action.emit(("screenshot", str(path)))
+        except Exception as error:  # noqa: BLE001
+            self.menu_action.emit(("screenshot-failed", f"{type(error).__name__}: {error}"))
 
     def _seek_with(self, x: float) -> None:
         """Left stick sideways: step 10 s back or forward, once per push."""

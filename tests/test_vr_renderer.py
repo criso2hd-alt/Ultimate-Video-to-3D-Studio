@@ -159,3 +159,40 @@ def test_pointer_rays_are_never_hidden_by_the_room(gl):
     r.draw_eye(view, proj, 0, (0.0, 1.6, 0.0), screen, "", rend.ROOM, ())
     clean = np.frombuffer(GL.glReadPixels(0, 0, W, H, GL.GL_RGB, GL.GL_UNSIGNED_BYTE), np.uint8).reshape(H, W, 3)[::-1]
     assert not ((clean[H // 2 - 6: H // 2 + 6, W // 2 - 60: W // 2 + 60, 2].astype(int) > 200)).any()   # and not without it
+
+
+def test_a_headset_screenshot_saves_exactly_the_eye_image_that_was_drawn(gl, tmp_path, monkeypatch):
+    import time as _time
+
+    cv2 = pytest.importorskip("cv2")
+    from ultimate_video_3d import paths
+    from ultimate_video_3d.vr.session import VRSession
+
+    monkeypatch.setattr(paths, "screenshots_dir", lambda: tmp_path)
+
+    class _Media:
+        is_open, playing, path, layout, aspect = False, False, None, "", 16 / 9
+
+    r = gl
+    r.upload(np.full((64, 128, 3), (200, 20, 20), np.uint8))
+    screen = geo.Screen(aspect=16 / 9, distance=3.0, width=3.2, origin=(0.0, 1.6, 0.0))
+    half = np.radians(45)
+    proj = geo.projection_matrix(-half, half, half * H / W, -half * H / W)
+    view = geo.view_matrix((0.0, 1.6, 0.0), (0, 0, 0, 1))
+    GL.glViewport(0, 0, W, H)
+    r.draw_eye(view, proj, 0, (0.0, 1.6, 0.0), screen, "", rend.ROOM, ())
+    drawn = np.frombuffer(GL.glReadPixels(0, 0, W, H, GL.GL_RGB, GL.GL_UNSIGNED_BYTE), np.uint8).reshape(H, W, 3)[::-1]
+
+    session = VRSession(_Media())
+    session._head = (np.array([0.0, 1.6, 0.0]), (0.0, 0.0, 0.0, 1.0))
+    session._save_eye_view()
+    end = _time.monotonic() + 5
+    files = []
+    while not files and _time.monotonic() < end:
+        files = list(tmp_path.glob("VR screenshot *.png"))
+        _time.sleep(0.05)
+    assert files, "no screenshot was written"
+    _time.sleep(0.1)
+    saved = cv2.cvtColor(cv2.imread(str(files[0])), cv2.COLOR_BGR2RGB)
+    assert saved.shape == (H, W, 3) and np.array_equal(saved, drawn)                    # the right way up, the right colours
+    assert session.menu.open and "saved" in session.menu.note.lower()                    # and the person is told

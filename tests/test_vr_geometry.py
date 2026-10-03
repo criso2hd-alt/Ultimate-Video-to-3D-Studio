@@ -168,3 +168,11 @@ def test_the_rig_keeps_the_head_tilt_and_only_turns_about_the_vertical():
     rig = g.rig_to_seat((0, 1.2, 4), 0.0, (0, 1.6, 0), (np.sin(0.2), 0, 0, np.cos(0.2)))     # looking a little up
     up = g.direction_through_rig(rig, np.array([0, 1.0, 0]))
     assert np.allclose(up, [0, 1, 0], atol=1e-9)                                  # the world stays upright
+
+
+def test_changing_seat_can_keep_the_turn_it_already_had():
+    first = g.rig_to_seat((1.0, 1.1, 5.0), 0.0, (0.0, 1.1, 0.0), (0.0, np.sin(0.4), 0.0, np.cos(0.4)))
+    other_head = np.array([0.3, 1.2, -0.1])
+    moved = g.rig_to_seat((-1.0, 1.1, 6.4), 0.0, other_head, (0.0, np.sin(-0.7), 0.0, np.cos(-0.7)), keep_turn=first)
+    assert np.allclose(moved[:3, :3], first[:3, :3])
+    assert np.allclose(g.through_rig(moved, other_head), [-1.0, 1.1, 6.4])                # still lands on the new seat

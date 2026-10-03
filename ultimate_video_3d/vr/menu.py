@@ -10,7 +10,7 @@ lights, seat, volume, exit), ``videos`` (the Library, three by two thumbnails a 
 Pressing a button returns an *action* tuple for whoever owns the headset to carry out, or None when the press was only
 about the menu itself (changing page, paging through videos):
     ("play",)  ("video", Tile)  ("lights", "auto"|"on"|"off")  ("volume", 0..1)  ("seat", +1|-1)  ("recentre",)
-    ("exit",)  ("close",)
+    ("exit",)  ("close",)  ("screenshot",)
 """
 
 from __future__ import annotations
@@ -67,6 +67,8 @@ class Menu:
         self.tiles: list[Tile] = []
         self.video_page = 0
         self.help_left = 0.0                # seconds until the help card closes itself; 0 = it stays
+        self.note = ""                      # a line under the main page's buttons ("Screenshot saved...")
+        self.note_left = 0.0
         self._buttons: list[_Button] = []
         self._dirty = True
         self._image: QImage | None = None
@@ -87,8 +89,15 @@ class Menu:
     def toggle(self) -> None:
         self.close() if self.open else self.show("main")
 
+    def set_note(self, text: str, seconds: float = 9.0) -> None:
+        self.note, self.note_left, self._dirty = text, seconds, True
+
     def tick(self, dt: float) -> None:
-        """Time passing: the first-time help card closes itself."""
+        """Time passing: the first-time help card closes itself, and a note fades after a while."""
+        if self.note and self.note_left > 0:
+            self.note_left -= max(0.0, dt)
+            if self.note_left <= 0:
+                self.note, self._dirty = "", True
         if self.open and self.page == "help" and self.help_left > 0:
             self.help_left -= max(0.0, dt)
             if self.help_left <= 0:
@@ -149,7 +158,7 @@ class Menu:
             self.volume = min(1.0, max(0.0, round(self.volume + (0.1 if button == "vol:+" else -0.1), 2)))
             self._dirty = True
             return ("volume", self.volume)
-        if button in ("recentre", "exit"):
+        if button in ("recentre", "exit", "screenshot"):
             return (button,)
         if button in ("vpage:-1", "vpage:1"):
             self.video_page = (self.video_page + int(button[6:])) % self.page_count
@@ -254,8 +263,11 @@ class Menu:
         self._button(p, "vol:-", QRectF(260, y, 90, 80), "-", pixels=44)
         self._text(p, QRectF(360, y, 330, 80), f"{round(self.volume * 100)}%", 34, INK, align=Qt.AlignmentFlag.AlignCenter)
         self._button(p, "vol:+", QRectF(700, y, 90, 80), "+", pixels=44)
-        self._button(p, "recentre", QRectF(48, 668, 560, 80), "Reset view (or press right stick)", pixels=30)
-        self._button(p, "exit", QRectF(672, 668, 560, 80), "Leave VR", style="danger", pixels=30)
+        if self.note:
+            self._text(p, QRectF(48, 616, W - 96, 44), self.note, 24, SIGNAL)
+        self._button(p, "recentre", QRectF(48, 668, 380, 80), "Reset view", pixels=30)
+        self._button(p, "screenshot", QRectF(450, 668, 380, 80), "Screenshot", pixels=30)
+        self._button(p, "exit", QRectF(852, 668, 380, 80), "Leave VR", style="danger", pixels=30)
 
     def _videos_page(self, p: QPainter) -> None:
         self._header(p, "Your videos", f"Page {self.video_page + 1} of {self.page_count}", back=True)
@@ -294,8 +306,8 @@ class Menu:
             ("Trigger on the screen,  or  A / X", "Play and pause"),
             ("Left menu button,  or  B / Y", "Open this menu: videos, lights, seat, volume"),
             ("Left stick, left or right", "Back or forward 10 seconds"),
-            ("Right stick, left or right", "Change seat"),
-            ("Press the right stick down", "Reset the view: back in your seat"),
+            ("Right stick, any direction", "Go to the seat that way"),
+            ("Press the right stick down", "Reset the view: face the screen"),
         )
         y = 150
         for keys, what in rows:

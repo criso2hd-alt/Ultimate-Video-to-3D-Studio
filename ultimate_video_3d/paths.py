@@ -91,6 +91,15 @@ def output_dir() -> Path:
     return path
 
 
+def screenshots_dir() -> Path:
+    """Where headset screenshots are saved: the person's Pictures folder if there is one (they look there first), else beside
+    the app's other data."""
+    pictures = Path.home() / "Pictures"
+    path = (pictures if pictures.is_dir() else data_dir()) / ("Ultimate Video to 3D Studio" if pictures.is_dir() else "screenshots")
+    path.mkdir(parents=True, exist_ok=True)
+    return path
+
+
 def luts_dir() -> Path:
     path = data_dir() / LUTS_DIR
     path.mkdir(parents=True, exist_ok=True)

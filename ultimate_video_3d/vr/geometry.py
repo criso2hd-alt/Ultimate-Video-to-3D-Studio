@@ -252,7 +252,7 @@ def translation(offset) -> np.ndarray:
     return m
 
 
-def rig_to_seat(seat_position, seat_yaw: float, head_position, head_orientation) -> np.ndarray:
+def rig_to_seat(seat_position, seat_yaw: float, head_position, head_orientation, keep_turn: np.ndarray | None = None) -> np.ndarray:
     """The matrix that carries the headset's tracked space (the "stage") into the room so that the person's head lands
     exactly on a seat's eye position, facing the way the seat faces.
 
@@ -260,7 +260,13 @@ def rig_to_seat(seat_position, seat_yaw: float, head_position, head_orientation)
     head and the lean of the body stay theirs. Walking around within the real room moves them the same way in the
     virtual one.
     """
-    turn = yaw_matrix(seat_yaw - yaw_of(head_orientation))
+    if keep_turn is not None:
+        # Only the place changes: whichever way the person is turned in the room stays as it was. (Turning them to face the
+        # seat's direction every time made the whole room swing round to wherever they happened to be looking.)
+        turn = np.eye(4)
+        turn[:3, :3] = np.asarray(keep_turn)[:3, :3]
+    else:
+        turn = yaw_matrix(seat_yaw - yaw_of(head_orientation))
     return translation(seat_position) @ turn @ translation(-np.asarray(head_position, np.float64))
 
 

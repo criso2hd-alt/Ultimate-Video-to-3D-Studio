@@ -292,6 +292,14 @@ click never also toggles play. `Menu.press` returns action tuples; `session._app
 (on Play in VR, after a conversion, and on every tab change). The Play in VR button is always shown and fades out, with the
 reason as its tooltip, when `vr.unavailable_reason()` is non-empty; a runtime with no headset behind it (XR
 FORM_FACTOR_UNAVAILABLE) becomes "Please connect your VR headset" in a box (`session.friendly_error`, `MainWindow._vr_failed`).
+**Seats and screenshots (headset feedback, 2026-10-03).** The right stick goes to the seat it points at (`state.pick_seat`: within 60
+degrees of the push, in the seat's own frame - forward is toward the screen - nearest wins; one move per push, the stick must
+return to the middle). Changing seat keeps the person's turn (`geometry.rig_to_seat(..., keep_turn=rig)`); only the first sit and
+Reset view (right stick press, or the menu button) face them the way the seat faces - before, every seat change spun the whole room
+to wherever they were looking. Meta's own Meta-button+trigger screenshot does not capture a Link session, so the menu has a
+Screenshot button: it closes the menu, waits `SHOT_DELAY` (3 s), reads the LEFT eye image straight out of the swapchain
+framebuffer (`session._save_eye_view`, menu and rays hidden for that frame) and saves a PNG to Pictures/Ultimate Video to 3D Studio
+(`paths.screenshots_dir`), then reopens the menu with a note. The seat < > buttons in the menu still step through the list.
 **Pointer rays are drawn last, on top, without depth test** (`renderer.draw_eye`, 5-element tuples (origin, direction, length,
 colour, landed) with a dot at the tip when `landed`). Depth-tested they were hidden piecemeal by chair backs and the console and
 looked "cut in half and shifted" in the headset; the menu panel also showed them ghosting through it. Reproduce without a

@@ -171,6 +171,10 @@ class VRController(QObject):
                 self.media.set_volume(self._volume)
         elif kind == "exit":
             self.stop()
+        elif kind == "screenshot":
+            self.notice.emit(f"Headset screenshot saved: {action[1]}")
+        elif kind == "screenshot-failed":
+            self.notice.emit(f"Could not save the screenshot: {action[1]}")
 
     # -- seats ------------------------------------------------------------------------------------------
 
