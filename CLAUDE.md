@@ -259,6 +259,25 @@ TODO (VR): make the player screen-size aware. The owner's room has a ~5.19 m wid
 width is 5.2 cm of eye separation and 'behind' disparity must stay under ~1.2% of the width (IPD 6.3 cm) or the eyes
 diverge; a depth-limit/convergence shift keyed on the `Screen` mesh width, with a visible note when it acts. The
 comfort bands in `zones.py` assume a smaller screen.
+**Baked rooms (built 2026-10-02).** `vr/gltf.py` reads a .glb (nodes, meshes, embedded images), `vr/room.py` turns a folder
+(`room.glb` + `room.json` + per-group `_dim`/`_screen` JPEGs) into a `Room` (groups of world-space triangles with
+lit/dim/screen pictures, `Seat_*` eye positions, the fixed `ScreenQuad`, the `BiasGlow` quad). `renderer.BAKED` draws it:
+`mix(dim, lit, room_light) + screen_bake * 2^-ev / screen_emission * picture_colour` in linear light, the room's own screen as
+a black panel with the picture letterboxed inside (`Screen.from_quad`, `picture_aspect`), and the `BiasGlow` halo tinted from
+the picture's four edge colours (additive, fades out before its quad edge). `session.set_room/set_seat`: the person is moved
+onto a seat with `geometry.rig_to_seat` (head lands on the seat's eye position, yaw matches, only about the vertical);
+`state.LightFader` dims the lights while the film plays and brings them to `light_level_paused` on pause; the right stick
+steps seats. `vr/controller.py` is what the window talks to (waits for the headset, previews loop muted and the first
+press unmutes); `app.py` has the Library's Play in VR, Space routing, and Settings > Virtual reality (room folder, or the
+first folder with a room.glb under `data/rooms/`). Preview any room without a headset:
+`python scripts/vr_room_preview.py <room_folder> <out_dir> --seat Seat_R2_Centre`; in the headset:
+`python scripts/vr_demo.py <video> sbs_half 120 --room <room_folder>`.
+Baking lessons (all hit for real): `smart_project(correct_aspect=True)` reads the material's texture image aspect, which is
+0x0 in a background run, and squashed a 9.5x5.2 m wall to a 14:1 sliver (18% atlas use; 89% with `correct_aspect=False`);
+`average_islands_scale` also wrecked packing; apply every object's transform before unwrapping (the unwrap ignores object
+scale); the first unwrap in a Blender session packs badly, so retry on low coverage; the owner's file was saved with an object
+in Edit Mode, which breaks `transform_apply` (go to Object Mode first); a background command over 10 minutes is killed, so
+bake per group/state and persist each group's UVs (`uv_<group>.npz`) so a later export matches every bake.
 Not yet checked: SteamVR and Virtual Desktop runtimes (`XR_RUNTIME_JSON=<json>` selects one for a single process
 without touching the system setting).
 The runtime prints a lot of its own log to stdout: never parse stdout for results.

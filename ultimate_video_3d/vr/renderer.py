@@ -388,7 +388,10 @@ class Renderer:
                 "count": len(group.indices), "lit": lit,
                 "dim": self._picture_texture(group.dim) if group.dim is not None else lit,      # no dim bake: lights stay up
                 "scr": self._picture_texture(group.screen) if group.screen is not None else black,
-                "scale": 2.0 ** -group.screen_ev, "has_screen": group.screen is not None,
+                # undo the brightening the bake was stored with (ev stops), then the emission it was baked at: a picture's
+                # white is emission strength 1, and the bake used more so that there was something to measure
+                "scale": 2.0 ** -group.screen_ev / max(self.room.screen_emission, 1e-6),
+                "has_screen": group.screen is not None,
             })
         glow = None
         if self.room.glow is not None:
@@ -430,7 +433,7 @@ class Renderer:
             GL.glUniform2f(GL.glGetUniformLocation(program, "u_half"), screen.width / 2, screen.height / 2)
             for name, colour in zip(("u_top", "u_bottom", "u_left", "u_right"), self.edge_colours):
                 GL.glUniform3f(GL.glGetUniformLocation(program, name), *map(float, colour))
-            GL.glUniform1f(GL.glGetUniformLocation(program, "u_strength"), 1.1 * (1.0 - 0.8 * float(self.room_light)))
+            GL.glUniform1f(GL.glGetUniformLocation(program, "u_strength"), 0.8 * (1.0 - 0.8 * float(self.room_light)))
             GL.glUniform1f(GL.glGetUniformLocation(program, "u_time"), now)
             GL.glEnable(GL.GL_BLEND)
             GL.glBlendFunc(GL.GL_ONE, GL.GL_ONE)

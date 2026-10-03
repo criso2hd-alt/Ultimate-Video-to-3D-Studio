@@ -1,5 +1,14 @@
 # VR room: what the app needs from the Blender file
 
+> **As built (2026-10-02):** the owner's home theatre was baked in **six groups** (not one atlas), each with its own UV
+> layout and three pictures: `wall_left` (stone, 4K), `walls_plaster` (plaster walls and doors, 4K), `floor_carpet` (4K),
+> `ceiling_panels` (ceiling and acoustic panels, 4K), `chairs_details` (armchairs, logo text and icon, 4K) and
+> `hall_floor` (seen only through the doors, 2K). Lit and dim bakes are full size, the screen-only bake is half the edge.
+> Everything below about "one material, one atlas" is the *minimum*; the loader handles any number of groups: a group is a
+> material named `Bake_<group>` whose `room.json` entry names its pictures. The bake is `scripts/blender/bake_room.py`
+> (run per group, then `--phase export`; see its docstring). The package is `room.glb` (lit bakes embedded) + `room.json` +
+> `<group>_dim.jpg` + `<group>_screen.jpg`, about 38 MB.
+
 One room = one folder, `room_<name>/`, loaded by the app (`ultimate_video_3d/vr/room.py`, to be written). Everything
 is baked, so the headset runs it easily; the app adds the live parts (the video, the screen's colour spill, the
 reflection, the LED glow, the light dimming).
