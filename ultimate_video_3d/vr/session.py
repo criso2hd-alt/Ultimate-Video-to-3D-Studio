@@ -27,7 +27,9 @@ from PySide6.QtCore import QObject, Signal
 
 from . import geometry as geo
 from .media import VRMedia
-from .renderer import ROOM, Renderer
+from . import room as roommod
+from .renderer import BAKED, ROOM, Renderer
+from .state import LightFader, SeatCycle
 
 APP_NAME = "Ultimate Video to 3D Studio"
 SEEK_MS = 10_000
@@ -208,6 +210,15 @@ class VRSession(QObject):
         self._toggle = threading.Event()
         self._placed = False
         self._head = (np.array([0.0, 1.6, 0.0]), (0.0, 0.0, 0.0, 1.0))
+        # a baked room, once one is chosen
+        self.room: roommod.Room | None = None
+        self.seat: str | None = None                      # the seat the person is in, by name
+        self._seats = SeatCycle([])
+        self._pending_seat: str | None = None             # a seat to move to as soon as the head is tracked
+        self._room_dirty = False
+        self._rig = np.eye(4)                             # headset space -> room (see geometry.rig_to_seat)
+        self._lights = LightFader()
+        self._seat_armed = True
 
     # -- control from the UI thread ---------------------------------------------------------------
 
@@ -233,6 +244,36 @@ class VRSession(QObject):
 
     def set_scene(self, scene: str) -> None:
         self.scene = scene
+
+    def set_room(self, room: roommod.Room | None) -> None:
+        """Use a baked room (its own fixed screen, seats and lighting), or None for the plain stand-in room."""
+        self.room = room
+        if room is None:
+            self.screen, self.scene, self.seat = geo.Screen(), ROOM, None
+            self._seats = SeatCycle([])
+            self._rig = np.eye(4)
+            self._placed = False
+        else:
+            self.screen = geo.Screen.from_quad(room.screen.matrix, room.screen.width, room.screen.height)
+            self.scene = BAKED
+            self._seats = SeatCycle([s.name for s in room.seats])
+            first = room.first_seat()
+            self._pending_seat = first.name if first is not None else None
+        self._room_dirty = True
+
+    def seat_names(self) -> list[tuple[str, str]]:
+        """(name, label) of every seat in the current room."""
+        return [(s.name, s.label) for s in self.room.seats] if self.room else []
+
+    def set_seat(self, name: str) -> None:
+        """Move the person to a seat (takes effect on the next frame the head is tracked)."""
+        if self.room is not None and self._seats.select(name):
+            self._pending_seat = name
+
+    def step_seat(self, direction: int) -> None:
+        name = self._seats.step(direction)
+        if name is not None:
+            self._pending_seat = name
 
     # -- the thread -------------------------------------------------------------------------------
 
@@ -312,11 +353,19 @@ class VRSession(QObject):
 
     def _frame(self, ctx, inputs: _Inputs, renderer: Renderer, frame_state, dt: float) -> None:
         media, screen = self.media, self.screen
-        screen.aspect = media.aspect
-        screen.floor_clearance = 0.12 if self.scene == ROOM else None      # on the room's floor, or at eye height
+        if self._room_dirty:
+            renderer.set_room(self.room)
+            self._room_dirty = False
+        if screen.fixed is not None:
+            screen.picture_aspect = media.aspect if media.is_open else None  # fitted inside the room's screen, never stretched
+        else:
+            screen.aspect = media.aspect
+            screen.floor_clearance = 0.12 if self.scene == ROOM else None    # on the room's floor, or at eye height
+        if self.room is not None:
+            renderer.room_light = self._lights.update(dt, media.playing, media.is_open, self.room.light_level_paused)
         picture = media.take_frame()
         if picture is not None:
-            renderer.upload(picture)
+            renderer.upload(picture, media.layout)
         elif not media.is_open and renderer.has_picture:
             renderer.clear_picture()
 
@@ -333,21 +382,37 @@ class VRSession(QObject):
         eye = 0
         positions = []
         orientation = None
+        rig_inverse = np.linalg.inv(self._rig)
         for view in ctx.view_loop(frame_state):
             p, o, fov = view.pose.position, view.pose.orientation, view.fov
             position, quat = (p.x, p.y, p.z), (o.x, o.y, o.z, o.w)
             positions.append(position)
             orientation = orientation or quat
-            renderer.draw_eye(geo.view_matrix(position, quat),
+            # the world is seen through the rig: the eye's place in the room, and the view into the room
+            renderer.draw_eye(geo.view_matrix(position, quat) @ rig_inverse,
                               geo.projection_matrix(fov.angle_left, fov.angle_right, fov.angle_up, fov.angle_down),
-                              eye, position, screen, media.layout, self.scene, beams)
+                              eye, tuple(geo.through_rig(self._rig, position)), screen, media.layout, self.scene, beams)
             eye += 1
         if positions:
             self._head = (np.mean(np.array(positions), axis=0), orientation)
-            if not self._placed or self._recentre.is_set():
+            if self.room is not None:
+                self._sit(self._head)
+            elif not self._placed or self._recentre.is_set():
                 self._recentre.clear()
                 screen.recentre(*self._head)
                 self._placed = True
+
+    def _sit(self, head: tuple) -> None:
+        """Move the person onto the chosen seat (or back onto it, after the Recentre button)."""
+        if self._recentre.is_set() and self.seat is not None:
+            self._recentre.clear()
+            self._pending_seat = self.seat
+        name, self._pending_seat = self._pending_seat, None
+        seat = self.room.seat(name) if name else None
+        if seat is None:
+            return
+        self._rig = geo.rig_to_seat(seat.position, seat.yaw, head[0], head[1])
+        self.seat = seat.name
 
     def _controls(self, hands: dict, dt: float) -> tuple:
         """Act on the controllers; returns the pointer beams to draw."""
@@ -358,13 +423,15 @@ class VRSession(QObject):
         for name, hand in hands.items():
             if not hand.valid:
                 continue
-            direction = hand.forward()
-            hit = geo.ray_hits_screen(screen, hand.position, direction)
+            origin = geo.through_rig(self._rig, hand.position)           # the controller as it is in the room
+            direction = geo.direction_through_rig(self._rig, hand.forward())
+            hit = geo.ray_hits_screen(screen, origin, direction)
             length = hit[0] if hit else 2.5
-            beams.append((hand.position, direction, length, BEAM_HIT if hit else BEAM_IDLE))
+            beams.append((origin, direction, length, BEAM_HIT if hit else BEAM_IDLE))
             if hand.select_pressed and hit:
                 self._toggle.set()
-            self._drag(name, hand)
+            if screen.fixed is None:
+                self._drag(name, hand)
             if hand.secondary_pressed:
                 self._recentre.set()
         if any(h.primary_pressed for h in hands.values()):
@@ -372,6 +439,8 @@ class VRSession(QObject):
         if self._toggle.is_set():
             self._toggle.clear()
             media.toggle()                                       # QObject methods are safe to call: Qt queues the work
+        if right and self.room is not None:
+            self._seat_with(right.stick[0])                          # right stick sideways: the next or previous seat
         if right and abs(right.stick[1]) > 0.15:
             screen.resize(1.0 + right.stick[1] * 0.9 * dt)
         if left:
@@ -379,6 +448,13 @@ class VRSession(QObject):
                 screen.push(-left.stick[1] * 1.6 * dt)
             self._seek_with(left.stick[0])
         return tuple(beams)
+
+    def _seat_with(self, x: float) -> None:
+        if abs(x) < 0.4:
+            self._seat_armed = True
+        elif abs(x) > 0.8 and self._seat_armed:
+            self._seat_armed = False
+            self.step_seat(1 if x > 0 else -1)
 
     def _seek_with(self, x: float) -> None:
         """Left stick sideways: step 10 s back or forward, once per push."""

@@ -122,6 +122,11 @@ class Screen:
     #: In a room, the gap between the floor and the picture's lower edge (metres). The screen then sits on the room,
     #: not at the viewer's eye height, so it looks like a cinema screen whatever the person's height. None: eye height.
     floor_clearance: float | None = None
+    #: A screen that is part of a room (a physical object): its unit-quad -> world matrix. Set, it cannot be moved or resized.
+    fixed: np.ndarray | None = None
+    #: With a fixed screen: the shape of the picture shown on it. A wider or narrower film is fitted inside the physical
+    #: screen with black bars, never stretched. None = the picture fills the screen.
+    picture_aspect: float | None = None
     origin: tuple[float, float, float] = (0.0, 1.6, 0.0)       # the viewer's head when it was placed
     heading: float = 0.0                     # which way the viewer faced then (yaw)
 
@@ -132,7 +137,14 @@ class Screen:
     def height(self) -> float:
         return self.width / max(0.2, self.aspect)
 
+    @classmethod
+    def from_quad(cls, matrix: np.ndarray, width: float, height: float) -> Screen:
+        """The screen a room provides: placed by ``matrix`` (unit quad -> world, size included)."""
+        return cls(aspect=width / max(height, 1e-6), width=width, fixed=np.array(matrix, np.float64))
+
     def centre(self) -> np.ndarray:
+        if self.fixed is not None:
+            return self.fixed[:3, 3].copy()
         forward = yaw_matrix(self.heading)[:3, :3] @ np.array([0.0, 0.0, -1.0])
         centre = np.asarray(self.origin, np.float64) + forward * self.distance
         centre[1] = (self.origin[1] + self.lift if self.floor_clearance is None
@@ -141,26 +153,49 @@ class Screen:
 
     def model_matrix(self) -> np.ndarray:
         """Unit quad (-0.5..0.5 in x and y, facing +z) -> world: sized, turned to face the viewer, and placed."""
+        if self.fixed is not None:
+            return self.picture_matrix()
         m = yaw_matrix(self.heading)
         m[:3, 3] = self.centre()
         scale = np.diag([self.width, self.height, 1.0, 1.0])
         return m @ scale
 
+    def physical_matrix(self) -> np.ndarray:
+        """The whole screen (for a room: the black panel), whatever picture is on it."""
+        return self.fixed if self.fixed is not None else self.model_matrix()
+
+    def picture_matrix(self) -> np.ndarray:
+        """Where the picture is drawn: the screen itself, or for a room screen the picture fitted inside it."""
+        if self.fixed is None or not self.picture_aspect:
+            return self.fixed if self.fixed is not None else self.model_matrix()
+        screen_aspect = self.aspect
+        sx, sy = (1.0, screen_aspect / self.picture_aspect) if self.picture_aspect > screen_aspect \
+            else (self.picture_aspect / screen_aspect, 1.0)
+        return self.fixed @ np.diag([sx, sy, 1.0, 1.0])
+
     def resize(self, factor: float) -> None:
         """Scale the picture about the viewer, keeping the angle it fills (so it looks bigger, not just nearer)."""
+        if self.fixed is not None:
+            return
         self.width = float(np.clip(self.width * factor, self.MIN_WIDTH, self.MAX_WIDTH))
 
     def push(self, delta: float) -> None:
         """Move it nearer (negative) or farther (positive), scaling with the distance so its size on the eye holds."""
+        if self.fixed is not None:
+            return
         new = float(np.clip(self.distance + delta, self.MIN_DISTANCE, self.MAX_DISTANCE))
         self.width = float(np.clip(self.width * new / self.distance, self.MIN_WIDTH, self.MAX_WIDTH))
         self.distance = new
 
     def raise_by(self, delta: float) -> None:
+        if self.fixed is not None:
+            return
         self.lift = float(np.clip(self.lift + delta, -1.5, 2.5))
 
     def recentre(self, head_position, head_orientation) -> None:
         """Put it straight in front of where the viewer is now looking, at their eye height."""
+        if self.fixed is not None:
+            return
         self.origin = tuple(float(v) for v in head_position)
         self.heading = yaw_of(head_orientation)
 
@@ -171,7 +206,7 @@ def ray_hits_screen(screen: Screen, origin, direction) -> tuple[float, float, fl
     None if it misses, points away, or is parallel. The screen is treated as flat; a mild curve changes the hit
     point by a few centimetres at the edges, which does not matter for pointing.
     """
-    model = screen.model_matrix()
+    model = screen.physical_matrix()
     inverse = np.linalg.inv(model)
     o = (inverse @ np.append(np.asarray(origin, np.float64), 1.0))[:3]
     d = (inverse @ np.append(np.asarray(direction, np.float64), 0.0))[:3]
@@ -187,3 +222,32 @@ def ray_hits_screen(screen: Screen, origin, direction) -> tuple[float, float, fl
     world = np.asarray(origin, np.float64) + np.asarray(direction, np.float64) * t
     metres = float(np.linalg.norm(world - np.asarray(origin, np.float64)))
     return metres, x + 0.5, 0.5 - y
+
+
+# --- sitting in a room ----------------------------------------------------------------------------------
+
+
+def translation(offset) -> np.ndarray:
+    m = np.eye(4)
+    m[:3, 3] = offset
+    return m
+
+
+def rig_to_seat(seat_position, seat_yaw: float, head_position, head_orientation) -> np.ndarray:
+    """The matrix that carries the headset's tracked space (the "stage") into the room so that the person's head lands
+    exactly on a seat's eye position, facing the way the seat faces.
+
+    The turn is about the head (so they are not swung around the room), and only about the vertical: the tilt of the
+    head and the lean of the body stay theirs. Walking around within the real room moves them the same way in the
+    virtual one.
+    """
+    turn = yaw_matrix(seat_yaw - yaw_of(head_orientation))
+    return translation(seat_position) @ turn @ translation(-np.asarray(head_position, np.float64))
+
+
+def through_rig(rig: np.ndarray, point) -> np.ndarray:
+    return (rig @ np.append(np.asarray(point, np.float64), 1.0))[:3]
+
+
+def direction_through_rig(rig: np.ndarray, direction) -> np.ndarray:
+    return rig[:3, :3] @ np.asarray(direction, np.float64)

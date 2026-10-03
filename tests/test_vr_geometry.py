@@ -113,3 +113,58 @@ def test_a_pointing_ray_finds_where_on_the_picture_it_lands():
     assert g.ray_hits_screen(s, (0, 1.6, 0), (-2.5, 0, -3.0)) is None                 # off the side
     assert g.ray_hits_screen(s, (0, 1.6, 0), (0, 0, 1)) is None                       # pointing away
     assert g.ray_hits_screen(s, (0, 1.6, 0), (1, 0, 0)) is None                       # parallel to it
+
+
+def test_a_room_screen_is_fixed_and_ignores_every_attempt_to_move_it():
+    matrix = np.eye(4)
+    matrix[:3, 3] = (0.0, 2.0, 0.04)
+    matrix[0, 0], matrix[1, 1] = 5.0, 2.8                                         # width and height in the matrix
+    screen = g.Screen.from_quad(matrix, 5.0, 2.8)
+    before = screen.model_matrix().copy()
+    screen.resize(2.0)
+    screen.push(+3.0)
+    screen.raise_by(1.0)
+    screen.recentre((1, 1.6, 1), (0, 0.5, 0, 0.866))
+    assert np.array_equal(screen.model_matrix(), before) and np.allclose(screen.centre(), [0, 2.0, 0.04])
+    assert screen.aspect == pytest.approx(5.0 / 2.8)
+    # pointing at it still works: a ray from a seat toward its middle lands at (0.5, 0.5)
+    hit = g.ray_hits_screen(screen, (0.0, 2.0, 6.0), (0.0, 0.0, -1.0))
+    assert hit is not None and hit[1] == pytest.approx(0.5) and hit[2] == pytest.approx(0.5)
+
+
+def test_a_film_wider_than_the_screen_is_letterboxed_not_stretched():
+    matrix = np.diag([5.0, 2.8, 1.0, 1.0])
+    matrix[:3, 3] = (0.0, 2.0, 0.0)
+    screen = g.Screen.from_quad(matrix, 5.0, 2.8)
+    screen.picture_aspect = 2.39                                                  # a scope film on a 16:9-ish screen
+    box = screen.picture_matrix()
+    assert box[0, 0] == pytest.approx(5.0)                                        # full width
+    assert box[1, 1] == pytest.approx(5.0 / 2.39, rel=1e-3) and box[1, 1] < 2.8  # shorter than the screen: black bars
+    assert np.allclose(box[:3, 3], [0, 2.0, 0])                                   # and centred
+    screen.picture_aspect = 1.0                                                   # a square picture: bars at the sides
+    box = screen.picture_matrix()
+    assert box[1, 1] == pytest.approx(2.8) and box[0, 0] == pytest.approx(2.8)
+    screen.picture_aspect = None                                                  # unknown: fill the screen
+    assert np.allclose(screen.picture_matrix(), matrix)
+    # a click on the black bars still counts as pointing at the screen
+    screen.picture_aspect = 2.39
+    assert g.ray_hits_screen(screen, (0.0, 2.0 + 1.3, 6.0), (0.0, 0.0, -1.0)) is not None
+
+
+def test_sitting_in_a_seat_puts_the_head_on_the_seat_and_turns_it_to_face_the_way_the_seat_faces():
+    seat, seat_yaw = np.array([1.5, 1.65, 6.3]), 0.0                              # a seat facing the screen wall (-z)
+    head, head_orientation = np.array([0.3, 1.1, -0.4]), (0.0, np.sin(0.3), 0.0, np.cos(0.3))   # somewhere, turned a little
+    rig = g.rig_to_seat(seat, seat_yaw, head, head_orientation)
+    assert np.allclose(g.through_rig(rig, head), seat)                            # the head lands on the seat
+    forward = g.quat_to_matrix(head_orientation) @ np.array([0, 0, -1.0])
+    turned = g.direction_through_rig(rig, forward)
+    assert np.allclose(turned[[0, 2]] / np.linalg.norm(turned[[0, 2]]), [0.0, -1.0], atol=1e-9)   # facing -z
+    # leaning forward half a metre in the real room moves them half a metre toward the screen in the virtual one
+    leaning = head + g.quat_to_matrix(head_orientation) @ np.array([0, 0, -0.5])
+    assert np.allclose(g.through_rig(rig, leaning) - seat, [0.0, 0.0, -0.5], atol=1e-9)
+
+
+def test_the_rig_keeps_the_head_tilt_and_only_turns_about_the_vertical():
+    rig = g.rig_to_seat((0, 1.2, 4), 0.0, (0, 1.6, 0), (np.sin(0.2), 0, 0, np.cos(0.2)))     # looking a little up
+    up = g.direction_through_rig(rig, np.array([0, 1.0, 0]))
+    assert np.allclose(up, [0, 1, 0], atol=1e-9)                                  # the world stays upright

@@ -42,6 +42,7 @@ from . import library as librarymod
 from . import zones as zonesmod
 from . import resume as resumemod
 from .librarypage import LibraryPage
+from .vr.controller import VRController
 from . import APP_TITLE, __version__, bootstrap, cloud, models, onboarding, support, updates, depth as depthmod, encoders, paths, pipeline, stereo, sysinfo, video, warmup
 from .controls import PreviewView, SystemGauge
 from .panels import ColourPanel, ExportPanel, LutPanel, ThreeDPanel, open_folder
@@ -673,6 +674,22 @@ class SettingsPage(QWidget):
         help_card.add(self.replay_tutorial)
         cards.append(help_card)
 
+        vr_card = ModuleCard("Virtual reality")
+        self.vr_status = QLabel("")
+        self.vr_status.setObjectName("hint")
+        self.vr_status.setWordWrap(True)
+        self.vr_room_label = QLabel("")
+        self.vr_room_label.setObjectName("hint")
+        self.vr_room_label.setWordWrap(True)
+        self.vr_room_button = QPushButton("Choose a VR room folder…")
+        self.vr_room_button.setObjectName("secondary")
+        self.vr_room_button.setToolTip("A folder with room.glb and room.json (a baked home theatre).")
+        self.vr_room_clear = QPushButton("Use the plain room")
+        self.vr_room_clear.setObjectName("secondary")
+        for widget in (self.vr_status, self.vr_room_label, self.vr_room_button, self.vr_room_clear):
+            vr_card.add(widget)
+        cards.append(vr_card)
+
         folders = ModuleCard("Folders")
         self.open_output = QPushButton("Open output folder")
         self.open_output.setObjectName("secondary")
@@ -756,6 +773,12 @@ class MainWindow(QMainWindow):
         self.library = librarymod.Library()
         self.library_page = LibraryPage(self.library)
         self.library_page.message.connect(lambda text: self.status.showMessage(text))
+        self.vr = VRController(self)
+        self.vr.notice.connect(lambda text: self.status.showMessage(text))
+        self.library_page.set_vr_available(VRController.available())
+        self.library_page.vr_requested.connect(self._play_in_vr)
+        self.library_page.space_hook = self._space_for_vr
+        QApplication.instance().installEventFilter(self)
         self.tabs.addTab(self.video_page, "Video")
         self.tabs.addTab(self.library_page, "Library")
         self.tabs.addTab(self.settings_page, "Settings")
@@ -1095,6 +1118,9 @@ class MainWindow(QMainWindow):
         sp.update_now.clicked.connect(lambda: self._check_updates(manual=True))
         sp.replay_tutorial.clicked.connect(self.replay_tutorial)
         sp.redetect.clicked.connect(lambda: self._run_probe(force=True))
+        sp.vr_room_button.clicked.connect(self._choose_vr_room)
+        sp.vr_room_clear.clicked.connect(self._clear_vr_room)
+        self._refresh_vr_settings()
         sp.open_output.clicked.connect(lambda: open_folder(paths.output_dir()))
         sp.open_luts.clicked.connect(lambda: open_folder(paths.luts_dir()))
         self._save_timer = QTimer(self)
@@ -1723,6 +1749,70 @@ class MainWindow(QMainWindow):
         page.stop.setVisible(False)
         page.bar.setVisible(False)
 
+    # -- virtual reality ---------------------------------------------------
+
+    def _vr_room_dir(self) -> Path | None:
+        """The room to sit in: the one chosen in Settings, else the first folder with a room.glb in the data folder."""
+        chosen = Path(self.settings.vr_room_dir) if self.settings.vr_room_dir else None
+        if chosen is not None and (chosen / "room.glb").is_file():
+            return chosen
+        rooms = paths.data_dir() / "rooms"
+        if rooms.is_dir():
+            for folder in sorted(p for p in rooms.iterdir() if p.is_dir()):
+                if (folder / "room.glb").is_file():
+                    return folder
+        return None
+
+    def _refresh_vr_settings(self) -> None:
+        sp = self.settings_page
+        sp.vr_status.setText("A VR headset can be used on this computer." if VRController.available() else
+                             "VR needs Windows, an OpenXR runtime (Meta Link, SteamVR or Virtual Desktop) and the VR "
+                             "components; none was found.")
+        room = self._vr_room_dir()
+        sp.vr_room_label.setText(f"Room: {room}" if room else "Room: the plain built-in room.")
+
+    def _choose_vr_room(self) -> None:
+        chosen = QFileDialog.getExistingDirectory(self, "Choose a VR room folder", self.settings.vr_room_dir or "")
+        if not chosen:
+            return
+        if not (Path(chosen) / "room.glb").is_file():
+            QMessageBox.warning(self, "Not a VR room", "That folder has no room.glb in it.")
+            return
+        self.settings.vr_room_dir = chosen
+        self._refresh_vr_settings()
+
+    def _clear_vr_room(self) -> None:
+        self.settings.vr_room_dir = ""
+        self._refresh_vr_settings()
+
+    def _play_in_vr(self, entry) -> None:
+        """Show a Library video in the headset, in the chosen room."""
+        if not self.vr.available() and self.vr.session is None:
+            QMessageBox.information(self, "VR is not available", self.settings_page.vr_status.text())
+            return
+        if self.vr.room is None or str(self.vr.room.folder) != str(self._vr_room_dir() or ""):
+            self.vr.use_room(self._vr_room_dir())
+        self.vr.show(entry.file, entry.layout, preview=False)
+
+    def _space_for_vr(self) -> bool:
+        """Space plays and pauses the video in the headset while one is running. True if it did."""
+        if self.vr.running and self.vr.media is not None and self.vr.media.is_open:
+            self.vr.toggle()
+            return True
+        return False
+
+    def eventFilter(self, obj, event):  # noqa: N802 - Qt name
+        from PySide6.QtCore import QEvent
+        from PySide6.QtWidgets import QAbstractSpinBox, QLineEdit, QTextEdit
+
+        if (event.type() == QEvent.Type.KeyPress and event.key() == Qt.Key.Key_Space and not event.modifiers()
+                and self.vr.running and self.vr.media is not None and self.vr.media.is_open):
+            focus = QApplication.focusWidget()
+            if not isinstance(focus, (QLineEdit, QTextEdit, QAbstractSpinBox)):     # never steal a space from a text field
+                self.vr.toggle()
+                return True
+        return super().eventFilter(obj, event)
+
     def _record_conversion(self, output, source_name: str = "") -> None:
         """List a finished video in the Library (its layout is whatever 3D layout was chosen)."""
         try:
@@ -1843,6 +1933,7 @@ class MainWindow(QMainWindow):
             self._thread.wait(15000)
         self.player.shutdown()
         self.library_page.shutdown()
+        self.vr.stop()
         self.engine.shutdown()
         if self._monitor is not None:
             self._monitor.close()

@@ -18,7 +18,7 @@ from OpenGL import GL
 
 from . import geometry as geo
 
-ROOM, VOID = "room", "void"
+ROOM, VOID, BAKED = "room", "void", "baked"
 
 # Room size in metres, in the same world as the screen (floor at y = 0, centred on x = 0).
 ROOM_HALF_WIDTH, ROOM_FRONT, ROOM_BACK, ROOM_HEIGHT = 5.0, 3.0, 9.0, 4.2
@@ -134,6 +134,71 @@ void main() {
 }
 """
 
+_BAKED_VS = """#version 330 core
+layout(location = 0) in vec3 p;
+layout(location = 1) in vec2 t;
+uniform mat4 u_vp;
+out vec2 v_uv;
+void main() {
+    v_uv = t;
+    gl_Position = u_vp * vec4(p, 1.0);
+}
+"""
+
+# The owner's baked room. Each group has three pictures on one UV layout: the lights on, the lights as during a film, and
+# only the screen's light. Mixed here in linear light: lights up or down, plus the screen's glow in the picture's colour.
+_BAKED_FS = "#version 330 core\n" + _COMMON + """
+in vec2 v_uv;
+uniform sampler2D u_lit;
+uniform sampler2D u_dim;
+uniform sampler2D u_scr;
+uniform float u_light;                          // 0 = film lighting, 1 = lights up
+uniform float u_scr_scale;                      // 2^-ev: the screen-only bake is stored brightened by ev stops
+uniform float u_scr_gain;                       // how strongly the screen lights the room (0 with no picture)
+uniform vec3 u_glow;                            // the picture's average colour (display-encoded)
+out vec4 colour;
+void main() {
+    vec3 lit = to_linear(texture(u_lit, v_uv).rgb);
+    vec3 dim = to_linear(texture(u_dim, v_uv).rgb);
+    vec3 scr = to_linear(texture(u_scr, v_uv).rgb) * u_scr_scale * to_linear(u_glow) * u_scr_gain;
+    colour = vec4(dither(to_display(mix(dim, lit, u_light) + scr)), 1.0);
+}
+"""
+
+# The halo behind the screen, like a TV's LED backlight: the colour of the picture's nearest edge, fading with distance.
+_GLOW_VS = """#version 330 core
+layout(location = 0) in vec3 p;
+uniform mat4 u_vp;
+out vec3 v_world;
+void main() {
+    v_world = p;
+    gl_Position = u_vp * vec4(p, 1.0);
+}
+"""
+
+_GLOW_FS = "#version 330 core\n" + _COMMON + """
+in vec3 v_world;
+uniform vec2 u_centre;                          // the screen's centre and half size, in the wall's x / y
+uniform vec2 u_half;
+uniform vec3 u_top;                             // the picture's edge colours (display-encoded)
+uniform vec3 u_bottom;
+uniform vec3 u_left;
+uniform vec3 u_right;
+uniform float u_strength;
+out vec4 colour;
+void main() {
+    vec2 d = v_world.xy - u_centre;
+    float wt = max(d.y - u_half.y, 0.0), wb = max(-d.y - u_half.y, 0.0);
+    float wl = max(-d.x - u_half.x, 0.0), wr = max(d.x - u_half.x, 0.0);
+    float outside = length(vec2(max(abs(d.x) - u_half.x, 0.0), max(abs(d.y) - u_half.y, 0.0)));
+    vec3 near = (to_linear(u_top) * wt + to_linear(u_bottom) * wb + to_linear(u_left) * wl + to_linear(u_right) * wr)
+                / max(wt + wb + wl + wr, 1e-4);
+    // a tight halo that is gone before the quad's own edge (the margins are 0.5-0.7 m), so no rectangle shows
+    float glow = exp(-outside * 4.0) * smoothstep(0.0, 0.04, outside) * (1.0 - smoothstep(0.22, 0.48, outside));
+    colour = vec4(to_display(near * glow * u_strength), 1.0);               // added to what is already there
+}
+"""
+
 _FLAT_VS = """#version 330 core
 layout(location = 0) in vec3 p;
 uniform mat4 u_mvp;
@@ -191,6 +256,10 @@ class Renderer:
         self.video_size = (0, 0)
         self.has_picture = False
         self.gain = 1.0
+        self.room = None                       # a vr.room.Room, once set_room() has been called
+        self._room_gl = None                   # its OpenGL objects, made on first use
+        self.room_light = 1.0                  # 0 = film lighting, 1 = lights up
+        self.edge_colours = np.zeros((4, 3), np.float32)       # top, bottom, left, right of the picture, 0..1
 
     # -- set up -----------------------------------------------------------------------------------
 
@@ -199,6 +268,8 @@ class Renderer:
         self._screen = _compile(_SCREEN_VS, _SCREEN_FS)
         self._room = _compile(_ROOM_VS, _ROOM_FS)
         self._flat = _compile(_FLAT_VS, _FLAT_FS)
+        self._baked = _compile(_BAKED_VS, _BAKED_FS)
+        self._glow_program = _compile(_GLOW_VS, _GLOW_FS)
         self._vao_quad = self._vao(np.array([(-.5, -.5), (.5, -.5), (.5, .5), (-.5, -.5), (.5, .5), (-.5, .5)], np.float32),
                                    [(0, 2, 0)], 8)
         room = _room_triangles()
@@ -238,8 +309,11 @@ class Renderer:
 
     # -- the picture ------------------------------------------------------------------------------
 
-    def upload(self, frame: np.ndarray) -> None:
-        """Make this decoded frame (uint8, height x width x 3, rows from the top) the one on the screen."""
+    def upload(self, frame: np.ndarray, layout: str = "") -> None:
+        """Make this decoded frame (uint8, height x width x 3, rows from the top) the one on the screen.
+
+        ``layout`` says where one eye's picture is within the frame, so the edge colours that light the wall behind the
+        screen come from the picture itself and not from the seam between the two eyes."""
         height, width = frame.shape[:2]
         GL.glBindTexture(GL.GL_TEXTURE_2D, self._texture)
         GL.glPixelStorei(GL.GL_UNPACK_ALIGNMENT, 1)
@@ -253,7 +327,118 @@ class Renderer:
         # the room is lit by the picture's average colour: a tiny sample is enough and nearly free
         step_y, step_x = max(1, height // 24), max(1, width // 48)
         self.glow = (frame[::step_y, ::step_x].reshape(-1, 3).mean(axis=0) / 255.0).astype(np.float32)
+        u0, v0, u1, v1 = geo.eye_uv_rect(layout, 0)
+        eye = frame[int(v0 * height):max(int(v1 * height), 1), int(u0 * width):max(int(u1 * width), 1)]
+        eh, ew = eye.shape[:2]
+        band_y, band_x = max(1, eh // 10), max(1, ew // 10)
+        sample = lambda part: (part[::max(1, part.shape[0] // 16), ::max(1, part.shape[1] // 16)]  # noqa: E731
+                               .reshape(-1, 3).mean(axis=0) / 255.0)
+        self.edge_colours = np.array([sample(eye[:band_y]), sample(eye[-band_y:]),
+                                      sample(eye[:, :band_x]), sample(eye[:, -band_x:])], np.float32)
         self.has_picture = True
+
+    def set_room(self, room) -> None:
+        """Use this baked room (a ``vr.room.Room``) for the BAKED scene; the GPU copies are made when first drawn."""
+        self.room = room
+        self._room_gl = None
+
+    @staticmethod
+    def _picture_texture(picture: np.ndarray) -> int:
+        texture = int(GL.glGenTextures(1))
+        GL.glBindTexture(GL.GL_TEXTURE_2D, texture)
+        GL.glPixelStorei(GL.GL_UNPACK_ALIGNMENT, 1)
+        height, width = picture.shape[:2]
+        GL.glTexImage2D(GL.GL_TEXTURE_2D, 0, GL.GL_RGB8, width, height, 0, GL.GL_RGB, GL.GL_UNSIGNED_BYTE,
+                        np.ascontiguousarray(picture))
+        GL.glGenerateMipmap(GL.GL_TEXTURE_2D)
+        GL.glTexParameteri(GL.GL_TEXTURE_2D, GL.GL_TEXTURE_MIN_FILTER, GL.GL_LINEAR_MIPMAP_LINEAR)
+        GL.glTexParameteri(GL.GL_TEXTURE_2D, GL.GL_TEXTURE_MAG_FILTER, GL.GL_LINEAR)
+        GL.glTexParameteri(GL.GL_TEXTURE_2D, GL.GL_TEXTURE_WRAP_S, GL.GL_CLAMP_TO_EDGE)
+        GL.glTexParameteri(GL.GL_TEXTURE_2D, GL.GL_TEXTURE_WRAP_T, GL.GL_CLAMP_TO_EDGE)
+        try:
+            GL.glTexParameterf(GL.GL_TEXTURE_2D, 0x84FE, 8.0)       # anisotropic filtering where the driver has it
+        except Exception:  # noqa: BLE001
+            pass
+        return texture
+
+    @staticmethod
+    def _indexed_vao(vertices: np.ndarray, indices: np.ndarray, attributes: list[tuple[int, int, int]], stride: int) -> int:
+        vao = int(GL.glGenVertexArrays(1))
+        GL.glBindVertexArray(vao)
+        vbo = int(GL.glGenBuffers(1))
+        GL.glBindBuffer(GL.GL_ARRAY_BUFFER, vbo)
+        GL.glBufferData(GL.GL_ARRAY_BUFFER, vertices.nbytes, vertices, GL.GL_STATIC_DRAW)
+        for index, count, offset in attributes:
+            GL.glEnableVertexAttribArray(index)
+            GL.glVertexAttribPointer(index, count, GL.GL_FLOAT, GL.GL_FALSE, stride, GL.ctypes.c_void_p(offset))
+        ebo = int(GL.glGenBuffers(1))
+        GL.glBindBuffer(GL.GL_ELEMENT_ARRAY_BUFFER, ebo)
+        GL.glBufferData(GL.GL_ELEMENT_ARRAY_BUFFER, indices.nbytes, indices, GL.GL_STATIC_DRAW)
+        GL.glBindVertexArray(0)
+        return vao
+
+    def _upload_room(self) -> None:
+        groups = []
+        black = self._picture_texture(np.zeros((2, 2, 3), np.uint8))
+        for group in self.room.groups:
+            vertices = np.ascontiguousarray(np.c_[group.positions, group.uv].astype(np.float32))
+            lit = self._picture_texture(group.lit)
+            groups.append({
+                "vao": self._indexed_vao(vertices, group.indices.astype(np.uint32), [(0, 3, 0), (1, 2, 12)], 20),
+                "count": len(group.indices), "lit": lit,
+                "dim": self._picture_texture(group.dim) if group.dim is not None else lit,      # no dim bake: lights stay up
+                "scr": self._picture_texture(group.screen) if group.screen is not None else black,
+                "scale": 2.0 ** -group.screen_ev, "has_screen": group.screen is not None,
+            })
+        glow = None
+        if self.room.glow is not None:
+            quad = self.room.glow
+            glow = {"vao": self._indexed_vao(np.ascontiguousarray(quad.positions, np.float32),
+                                              quad.indices.astype(np.uint32), [(0, 3, 0)], 12),
+                    "count": len(quad.indices)}
+        self._room_gl = {"groups": groups, "glow": glow}
+
+    def _draw_baked_room(self, vp: np.ndarray, now: float) -> None:
+        if self._room_gl is None:
+            self._upload_room()
+        program = self._baked
+        GL.glUseProgram(program)
+        self._m4(program, "u_vp", vp)
+        for name, unit in (("u_lit", 0), ("u_dim", 1), ("u_scr", 2)):
+            GL.glUniform1i(GL.glGetUniformLocation(program, name), unit)
+        GL.glUniform1f(GL.glGetUniformLocation(program, "u_light"), float(self.room_light))
+        GL.glUniform3f(GL.glGetUniformLocation(program, "u_glow"), *self.glow)
+        GL.glUniform1f(GL.glGetUniformLocation(program, "u_time"), now)
+        # the picture lights the room most when the room lights are down
+        gain = (1.0 - 0.75 * float(self.room_light)) * self.gain if self.has_picture else 0.0
+        GL.glUniform1f(GL.glGetUniformLocation(program, "u_scr_gain"), gain)
+        for group in self._room_gl["groups"]:
+            for unit, key in ((0, "lit"), (1, "dim"), (2, "scr")):
+                GL.glActiveTexture(GL.GL_TEXTURE0 + unit)
+                GL.glBindTexture(GL.GL_TEXTURE_2D, group[key])
+            GL.glUniform1f(GL.glGetUniformLocation(program, "u_scr_scale"), group["scale"])
+            GL.glBindVertexArray(group["vao"])
+            GL.glDrawElements(GL.GL_TRIANGLES, group["count"], GL.GL_UNSIGNED_INT, None)
+        GL.glActiveTexture(GL.GL_TEXTURE0)
+        glow = self._room_gl["glow"]
+        if glow is not None and self.has_picture and self.room.screen is not None:
+            program = self._glow_program
+            GL.glUseProgram(program)
+            self._m4(program, "u_vp", vp)
+            screen = self.room.screen
+            GL.glUniform2f(GL.glGetUniformLocation(program, "u_centre"), float(screen.centre[0]), float(screen.centre[1]))
+            GL.glUniform2f(GL.glGetUniformLocation(program, "u_half"), screen.width / 2, screen.height / 2)
+            for name, colour in zip(("u_top", "u_bottom", "u_left", "u_right"), self.edge_colours):
+                GL.glUniform3f(GL.glGetUniformLocation(program, name), *map(float, colour))
+            GL.glUniform1f(GL.glGetUniformLocation(program, "u_strength"), 1.1 * (1.0 - 0.8 * float(self.room_light)))
+            GL.glUniform1f(GL.glGetUniformLocation(program, "u_time"), now)
+            GL.glEnable(GL.GL_BLEND)
+            GL.glBlendFunc(GL.GL_ONE, GL.GL_ONE)
+            GL.glDepthMask(GL.GL_FALSE)
+            GL.glBindVertexArray(glow["vao"])
+            GL.glDrawElements(GL.GL_TRIANGLES, glow["count"], GL.GL_UNSIGNED_INT, None)
+            GL.glDepthMask(GL.GL_TRUE)
+            GL.glDisable(GL.GL_BLEND)
 
     def clear_picture(self) -> None:
         self.has_picture = False
@@ -297,6 +482,20 @@ class Renderer:
             GL.glUniform1f(GL.glGetUniformLocation(program, "u_time"), now)
             GL.glBindVertexArray(self._vao_room)
             GL.glDrawArrays(GL.GL_TRIANGLES, 0, self._room_count)
+
+        if scene == BAKED and self.room is not None:
+            self._draw_baked_room(vp, now)
+            GL.glActiveTexture(GL.GL_TEXTURE0)
+            GL.glBindTexture(GL.GL_TEXTURE_2D, self._texture)
+
+        if screen.fixed is not None:                          # the room's screen: a black panel the picture sits on
+            GL.glUseProgram(self._flat)
+            self._m4(self._flat, "u_mvp", vp @ screen.physical_matrix())
+            GL.glUniform4f(GL.glGetUniformLocation(self._flat, "u_colour"), 0.004, 0.004, 0.006, 1.0)
+            GL.glBindVertexArray(self._vao_quad)
+            GL.glDepthMask(GL.GL_FALSE)                       # no depth written, or the picture (same plane) would fail the test
+            GL.glDrawArrays(GL.GL_TRIANGLES, 0, 6)
+            GL.glDepthMask(GL.GL_TRUE)
 
         if self.has_picture:
             program = self._screen

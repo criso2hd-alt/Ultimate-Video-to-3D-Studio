@@ -175,11 +175,15 @@ class LibraryPage(QWidget):
     """The tab: grid on the left, player on the right."""
 
     message = Signal(str)                    # a line for the window's status bar
+    vr_requested = Signal(object)            # the entry to play in the headset
 
     def __init__(self, library: lib.Library, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self.library = library
         self._current: lib.Entry | None = None
+        self._vr_available = False
+        #: Set by the window: called when Space is pressed; returns True if it used the key (a headset is playing).
+        self.space_hook = None
         self._dragging = False
         self._thumbs = ThreadPoolExecutor(max_workers=1, thread_name_prefix="uv3d-thumb")
         #: Held while a thumbnail is being made, and while a file is deleted: a file being read cannot be moved.
@@ -305,6 +309,11 @@ class LibraryPage(QWidget):
         self.remove_button.setObjectName("secondary")
         self.remove_button.setToolTip("Forget this video here. The file is not touched.")
         self.remove_button.clicked.connect(self.remove_selected)
+        self.vr_button = QPushButton("Play in VR")
+        self.vr_button.setObjectName("secondary")
+        self.vr_button.setToolTip("Watch this video in your VR headset (put the headset on when it says so).")
+        self.vr_button.clicked.connect(self._play_in_vr)
+        self.vr_button.setVisible(False)
         self.delete_button = QPushButton("Delete…")
         self.delete_button.setObjectName("secondary")
         self.delete_button.setToolTip("Move the file to the Recycle Bin.")
@@ -312,6 +321,7 @@ class LibraryPage(QWidget):
         for button in (self.folder_button, self.remove_button, self.delete_button):
             button.setEnabled(False)
             actions.addWidget(button)
+        actions.addWidget(self.vr_button)
         actions.addStretch(1)
         right.addLayout(actions)
 
@@ -376,6 +386,7 @@ class LibraryPage(QWidget):
         for button in (self.folder_button, self.remove_button, self.delete_button):
             button.setEnabled(entry is not None)
         self.delete_button.setEnabled(entry is not None and not entry.missing)
+        self.vr_button.setEnabled(self._vr_available and entry is not None and not entry.missing)
         if entry is not None:
             self.caption.setText(f"{entry.title}  ·  {entry.detail}"
                                  + ("" if entry.kind == lib.CONVERTED else "  ·  added by you"))
@@ -512,7 +523,21 @@ class LibraryPage(QWidget):
         self.player.shutdown()
         self._thumbs.shutdown(wait=False, cancel_futures=True)
 
+    def set_vr_available(self, available: bool) -> None:
+        """Show the Play in VR button (the window says whether a headset can be used on this computer)."""
+        self._vr_available = available
+        self.vr_button.setVisible(available)
+        self._selected(self.selected_entry())
+
+    def _play_in_vr(self) -> None:
+        entry = self.selected_entry()
+        if entry is not None and not entry.missing:
+            self.player.pause()                           # the picture moves to the headset
+            self.vr_requested.emit(entry)
+
     def _space(self) -> None:
+        if self.space_hook is not None and self.space_hook():
+            return                                        # a headset is playing: Space controls that
         if self._current is not None:
             self.player.toggle()
 

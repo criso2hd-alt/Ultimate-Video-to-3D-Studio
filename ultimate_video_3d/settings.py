@@ -74,6 +74,7 @@ class AppSettings:
     check_updates: bool = True
     last_video_dir: str = ""
     last_lut_dir: str = ""
+    vr_room_dir: str = ""                # a baked VR room folder; "" = the first one found, or the plain stand-in room
     #: The first-launch encoder probe (see encoders.ProbeReport), or {} if not run.
     encoder_probe: dict = field(default_factory=dict)
     #: 0 for a fresh install; the version of the tour last seen.
@@ -110,7 +111,7 @@ class AppSettings:
             colour=ColourSettings.from_dict(raw.get("colour")),
             export=build(ExportSettings, raw.get("export")),
         )
-        for name in ("theme", "density", "preview_mode", "last_video_dir", "last_lut_dir"):
+        for name in ("theme", "density", "preview_mode", "last_video_dir", "last_lut_dir", "vr_room_dir"):
             if isinstance(raw.get(name), str):
                 setattr(settings, name, raw[name])
         if isinstance(raw.get("encoder_probe"), dict):
