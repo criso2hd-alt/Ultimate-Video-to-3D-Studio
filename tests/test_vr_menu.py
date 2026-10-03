@@ -514,8 +514,14 @@ def test_where_screenshots_go(tmp_path, monkeypatch):
     from ultimate_video_3d import paths
 
     monkeypatch.setattr(paths.Path, "home", classmethod(lambda cls: tmp_path))
+    monkeypatch.setattr(paths, "_known_pictures_dir", lambda: None)
     (tmp_path / "Pictures").mkdir()
     assert paths.screenshots_dir() == tmp_path / "Pictures" / "Ultimate Video to 3D Studio"
+    onedrive = tmp_path / "OneDrive" / "Pictures"
+    onedrive.mkdir(parents=True)
+    monkeypatch.setattr(paths, "_known_pictures_dir", lambda: onedrive)             # Windows' own Pictures wins over ~/Pictures
+    assert paths.screenshots_dir() == onedrive / "Ultimate Video to 3D Studio"
+    monkeypatch.setattr(paths, "_known_pictures_dir", lambda: None)
     monkeypatch.setattr(paths, "data_dir", lambda: tmp_path / "data")
     (tmp_path / "data").mkdir()
     (tmp_path / "Pictures" / "Ultimate Video to 3D Studio").rmdir()

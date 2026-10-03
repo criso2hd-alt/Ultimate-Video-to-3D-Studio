@@ -91,11 +91,36 @@ def output_dir() -> Path:
     return path
 
 
+def _known_pictures_dir() -> Path | None:
+    """The folder Windows itself calls Pictures. It is not always ``~/Pictures``: with OneDrive backing up the Pictures folder
+    it lives in ``~/OneDrive/Pictures``, and a plain ``~/Pictures`` beside it is a different folder the person never opens."""
+    if sys.platform != "win32":
+        return None
+    try:
+        import ctypes
+        from ctypes import wintypes
+
+        class GUID(ctypes.Structure):
+            _fields_ = [("a", wintypes.DWORD), ("b", wintypes.WORD), ("c", wintypes.WORD), ("d", ctypes.c_ubyte * 8)]
+
+        folder_id = GUID(0x33E28130, 0x4E1E, 0x4676, (ctypes.c_ubyte * 8)(0x83, 0x5A, 0x98, 0x39, 0x5C, 0x3B, 0xC3, 0xBB))   # FOLDERID_Pictures
+        result = ctypes.c_wchar_p()
+        if ctypes.windll.shell32.SHGetKnownFolderPath(ctypes.byref(folder_id), 0, None, ctypes.byref(result)) != 0:
+            return None
+        path = Path(result.value)
+        ctypes.windll.ole32.CoTaskMemFree(result)
+        return path if path.is_dir() else None
+    except Exception:  # noqa: BLE001 - fall back to ~/Pictures
+        return None
+
+
 def screenshots_dir() -> Path:
-    """Where headset screenshots are saved: the person's Pictures folder if there is one (they look there first), else beside
-    the app's other data."""
-    pictures = Path.home() / "Pictures"
-    path = (pictures if pictures.is_dir() else data_dir()) / ("Ultimate Video to 3D Studio" if pictures.is_dir() else "screenshots")
+    """Where headset screenshots are saved: the person's Pictures folder (they look there first), else beside the app's data."""
+    pictures = _known_pictures_dir() or Path.home() / "Pictures"
+    if pictures.is_dir():
+        path = pictures / "Ultimate Video to 3D Studio"
+    else:
+        path = data_dir() / "screenshots"
     path.mkdir(parents=True, exist_ok=True)
     return path
 
