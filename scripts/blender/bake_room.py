@@ -37,7 +37,7 @@ import numpy as np
 # size: edge of the square atlas for the lit and dim bakes. The screen-only bake is smoother and uses a quarter of
 # the pixels (half the edge). Group choice balances texel density (pixels per metre) so no atlas is stretched thin.
 GROUPS: dict[str, dict] = {
-    "wall_left": {"objects": ["Wall_Left"], "size": 4096},
+    "wall_left": {"objects": ["Wall_Right_Left"], "size": 4096},       # the side walls + stone; renamed from Wall_Left in the owner's file
     "walls_plaster": {"objects": ["Wall_Back", "Wall_Front", "Wall_Back.002", "Door2"], "size": 4096},
     "floor_carpet": {"objects": ["Floor"], "size": 4096},
     "ceiling_panels": {"objects": ["Ceiling", "AcusticPanels"], "size": 4096},        # Ceiling.001 is never seen: not baked
@@ -45,9 +45,29 @@ GROUPS: dict[str, dict] = {
     "hall_floor": {"objects": ["Floor.001"], "size": 2048},        # only seen through the doors
 }
 NOT_BAKED_HIDDEN = ("BiasGlow",)            # drawn live by the app: must not paint the wall behind the screen
+GLOW_PREFIX = "BiasGlow"                    # ...and so is every object whose name starts with it (BiasGlow.001, BiasGlow_Floor...)
 LIGHT_COLLECTIONS = ("03_LIGHTS_LIT", "04_LIGHTS_DIM")
 SCREEN_STRENGTH = 8.0                       # the Screen's emission for the screen-only bake (matches its bake3_strength)
 MARGIN_PX = 16
+
+
+#: Meshes that are deliberately not baked: the glow planes and the screen are drawn live, the reference figure is hidden, and
+#: the second ceiling is never seen.
+NOT_BAKED_OK = ("Screen", "REF_Person_1.75m", "Ceiling.001")
+
+
+def uncovered_meshes() -> list[str]:
+    """Visible meshes that no group bakes. They would be exported with their raw material and show up black (the owner's
+    first bake lost things this way), so a bake refuses to start until each is in a group or on the not-baked list."""
+    grouped = {name for spec in GROUPS.values() for name in spec["objects"]}
+    return sorted(o.name for o in bpy.data.objects
+                  if o.type == "MESH" and not o.hide_render and o.name not in grouped
+                  and o.name not in NOT_BAKED_OK and not o.name.startswith(GLOW_PREFIX))
+
+
+def missing_objects() -> list[str]:
+    """Names listed in GROUPS that the file does not have (an object renamed or deleted since the groups were written)."""
+    return sorted({name for spec in GROUPS.values() for name in spec["objects"] if name not in bpy.data.objects})
 
 
 def deselect_all() -> None:
@@ -79,6 +99,9 @@ def parse(argv: list[str]) -> dict:
     i = 1
     while i < len(argv):
         key = argv[i]
+        if key == "--allow-unbaked":                  # a flag, not a pair
+            i += 1
+            continue
         if key == "--samples":
             out["samples"] = int(argv[i + 1])
         elif key == "--only":
@@ -424,6 +447,15 @@ def main() -> None:
     view = (scene.view_settings.view_transform, scene.view_settings.look, scene.view_settings.exposure)
     log("view transform:", view, "| file saved by Blender", bpy.data.version, "| phase", opts["phase"])
     ensure_object_mode()
+    problems = []
+    if missing_objects():
+        problems.append("listed in GROUPS but not in the file (renamed or deleted?): " + ", ".join(missing_objects()))
+    if uncovered_meshes():
+        problems.append("in the file but in no group, so they would come out black: " + ", ".join(uncovered_meshes()))
+    if problems and "--allow-unbaked" not in argv:
+        for line in problems:
+            log("STOP |", line)
+        raise SystemExit("fix GROUPS in scripts/blender/bake_room.py (or pass --allow-unbaked after --): " + " | ".join(problems))
     report = load_report(out)
     report.update({"samples": opts["samples"], "view": view[0]})
 
@@ -443,9 +475,9 @@ def main() -> None:
 
     configure_cycles(opts["samples"])
     switches = Switches()
-    for name in NOT_BAKED_HIDDEN:
-        if name in bpy.data.objects:
-            bpy.data.objects[name].hide_render = True
+    for obj in bpy.data.objects:
+        if obj.name in NOT_BAKED_HIDDEN or obj.name.startswith(GLOW_PREFIX):
+            obj.hide_render = True
     if "REF_Person_1.75m" in bpy.data.objects:
         bpy.data.objects["REF_Person_1.75m"].hide_render = True
 

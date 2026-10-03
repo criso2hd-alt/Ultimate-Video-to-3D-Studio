@@ -62,7 +62,8 @@ def newell(points):
 
 def main() -> None:
     depsgraph = bpy.context.evaluated_depsgraph_get()
-    objects = [o for o in bpy.data.objects if o.type == "MESH" and o.name not in SKIP_OBJECTS and not o.hide_render]
+    objects = [o for o in bpy.data.objects if o.type == "MESH" and o.name not in SKIP_OBJECTS
+               and not o.name.startswith("BiasGlow") and not o.hide_render]       # glow planes are not part of the room
     all_verts, all_faces, owner = [], [], []
     per_object = {}
     for obj in objects:
