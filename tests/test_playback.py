@@ -280,6 +280,30 @@ def test_transport_overlay_shows_on_hover_and_fades_when_the_pointer_rests(qapp)
     view.close()
 
 
+def test_while_converting_the_picture_shows_progress_not_a_play_button_or_cache_notes(qapp):
+    from ultimate_video_3d.controls import PreviewView
+
+    view = PreviewView()
+    view.resize(600, 340)
+    view.set_images([np.zeros((36, 64, 3), np.uint8)])
+    view.set_note("buffered - 2s ahead")
+    view.show()
+    qapp.processEvents()
+    view.set_converting(["Elapsed 1m 05s   -   ~2m 10s left", "Frame 100 of 300"])
+    QApplication.sendEvent(view, QEvent(QEvent.Type.Enter))
+    _spin(qapp, 0.4)
+    assert view._overlay == 0.0                                          # no play button while hovering
+    shot = view.grab().toImage()
+    band = [shot.pixelColor(x, y).lightness() for x in range(100, 500, 2) for y in range(view.height() - 70, view.height() - 14)]
+    assert max(band) > 150                                        # the progress text is drawn there (light on dark)
+    view.set_converting(None)
+    QApplication.sendEvent(view, QEvent(QEvent.Type.Leave))
+    QApplication.sendEvent(view, QEvent(QEvent.Type.Enter))
+    _spin(qapp, 0.4)
+    assert view._overlay > 0.95                                          # and the button is back afterwards
+    view.close()
+
+
 def test_view_bar_is_permanent_with_2d_first_and_sits_above_the_timeline(qapp):
     win = appmod.MainWindow()
     try:

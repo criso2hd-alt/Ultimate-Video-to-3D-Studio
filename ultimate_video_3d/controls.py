@@ -418,6 +418,7 @@ class PreviewView(CanvasView):
         self._index = 0
         self._badge = ""
         self._note = ""
+        self._stats: list[str] | None = None     # lines to show while a conversion runs (None: not converting)
         self._wiggle = QTimer(self)
         self._wiggle.setInterval(130)          # ~7.5 Hz: the classic "wigglegram" rate
         self._wiggle.timeout.connect(self._flip)
@@ -460,7 +461,19 @@ class PreviewView(CanvasView):
         self._fade.setEndValue(target)
         self._fade.start()
 
+    def set_converting(self, lines: list[str] | None) -> None:
+        """While a conversion runs the picture is its progress: no play button and no preview notes, but the elapsed and
+        remaining time and what is being made, in the lines given (None ends this)."""
+        self._stats = list(lines) if lines is not None else None
+        if self._stats is not None:
+            self._idle.stop()
+            self._fade.stop()
+            self._overlay = 0.0
+        self.update()
+
     def _show_overlay(self) -> None:
+        if self._stats is not None:
+            return                              # converting: nothing to play or pause
         if self._images:
             self._fade_to(1.0)
             self._idle.start()
@@ -545,7 +558,9 @@ class PreviewView(CanvasView):
         painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform)
         rect = self._display_rect(image.size())
         painter.drawImage(rect, image)
-        if self._note:
+        if self._stats is not None:
+            self._paint_stats(painter)
+        elif self._note:
             painter.save()
             _overlay_font(painter, 8.5, caps=False)
             painter.setPen(_OVERLAY_READ)
@@ -559,8 +574,27 @@ class PreviewView(CanvasView):
                 _corner_label(painter, self._badge, rect, self, True, accent=True)
             _paint_readout(painter, self, self._readout_text(image.size()))
             painter.restore()
-        if self._overlay > 0.01:
+        if self._overlay > 0.01 and self._stats is None:
             self._paint_transport(painter)
+
+    def _paint_stats(self, painter: QPainter) -> None:
+        """The conversion's progress lines in a dim panel at the bottom of the picture."""
+        painter.save()
+        _overlay_font(painter, 9.5, caps=False)
+        metrics = painter.fontMetrics()
+        line_h = metrics.height() + 3
+        width = min(self.width() - 24, max((metrics.horizontalAdvance(t) for t in self._stats), default=0) + 36)
+        height = line_h * len(self._stats) + 14
+        panel = QRectF((self.width() - width) / 2.0, self.height() - height - 14, width, height)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(QColor(8, 14, 22, 190))
+        painter.drawRoundedRect(panel, 10.0, 10.0)
+        painter.setPen(_OVERLAY_READ)
+        for i, text in enumerate(self._stats):
+            painter.drawText(QRectF(panel.left(), panel.top() + 7 + i * line_h, panel.width(), line_h),
+                             Qt.AlignmentFlag.AlignCenter, metrics.elidedText(text, Qt.TextElideMode.ElideRight, int(width - 20)))
+        painter.restore()
 
     def _paint_transport(self, painter: QPainter) -> None:
         """The round play/pause button, in the middle of the picture: it shows what a click will do."""

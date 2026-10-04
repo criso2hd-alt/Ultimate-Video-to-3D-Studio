@@ -315,3 +315,26 @@ def test_the_start_vr_button_connects_without_choosing_a_video_and_stop_vr_leave
 
 def test_automatic_headset_watching_is_off_unless_the_person_turns_it_on(win):
     assert win.settings.vr_auto_connect is False and not win.settings_page.vr_auto.isChecked()
+
+
+def test_changing_the_format_replaces_the_last_runs_encoder_message_with_the_files_description(win):
+    from ultimate_video_3d import video as videomod
+
+    page = win.video_page
+    page.info = videomod.VideoInfo(1920, 1080, 24.0, 240, False, 10.0)
+    page.info_label.setText("Encoding with NVIDIA H.264 at 12.0 Mb/s")        # left over from the last conversion
+    win._export_changed()
+    assert "H.264" not in page.info_label.text() and page.info_label.text() == page.info.describe()
+
+
+def test_a_running_conversion_puts_its_times_on_the_picture_and_clears_them_after(win):
+    from ultimate_video_3d.pipeline import VideoProgress
+
+    page = win.video_page
+    win._converting = True
+    win._frame_done(VideoProgress("starting", message="Encoding with NVIDIA H.265 at 9.0 Mb/s"))
+    win._frame_done(VideoProgress("converting", 50, 200, 20.0, None, "hevc_nvenc"))
+    assert page.preview._stats and any("Elapsed" in line for line in page.preview._stats)
+    assert any("H.265" in line for line in page.preview._stats)
+    win._teardown()
+    assert page.preview._stats is None

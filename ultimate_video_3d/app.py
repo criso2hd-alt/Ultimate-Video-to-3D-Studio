@@ -797,6 +797,7 @@ class MainWindow(QMainWindow):
         self._probe_thread: QThread | None = None
         self._probe_dialog: DownloadDialog | None = None
         self._eta = _EtaTracker()
+        self._convert_began, self._convert_note, self._convert_fps = 0.0, "", 0.0
         self._converting = False
         #: (proxy frame, id) written by the decode thread as one atomic assignment.
         self._current: tuple[np.ndarray, int] | None = None
@@ -1477,6 +1478,9 @@ class MainWindow(QMainWindow):
     def _export_changed(self) -> None:
         self._save_timer.start()
         self.export_refresh()
+        page = self.video_page
+        if not self._converting and page.info is not None:
+            page.info_label.setText(page.info.describe())   # not the last run's "Encoding with H.264 ..." for a format no longer chosen
 
     def export_refresh(self) -> None:
         self._update_encoder_pill()
@@ -1825,6 +1829,10 @@ class MainWindow(QMainWindow):
         total = limit if limit is not None else whole
         page.bar.setMaximum(total or 0)
         self._eta = _EtaTracker()
+        self._convert_began = time.monotonic()
+        self._convert_note = ""                           # "Encoding with ... at N Mb/s", from the encoder's start-up message
+        self._convert_fps = page.info.fps if page.info else 0.0
+        page.preview.set_converting([f"Starting the conversion of {page.source.name if page.source else 'the video'}..."])
 
         self._thread = QThread(self)
         self._worker = ConvertWorker(page.disc_stream or page.source, page.output_path, settings, start, limit, self.gpus, resume)
@@ -1871,17 +1879,33 @@ class MainWindow(QMainWindow):
         page = self.video_page
         if update.stage == "starting":
             page.info_label.setText(update.message)
+            self._convert_note = update.message
         elif update.stage == "converting":
             page.bar.setValue(update.index)
             self._eta.tick()
             left = self._eta.remaining(update.total - update.index if update.total else 0)
             speed = f"{update.fps:.1f} fps"
             page.bar.setFormat(f"%v of %m frames · {speed}" + (f" · ~{_short_duration(left)} left" if left else ""))
+            elapsed = time.monotonic() - self._convert_began
+            first = f"Elapsed {_short_duration(elapsed)}   ·   " + (f"~{_short_duration(left)} left" if left else "working out the time left...")
+            if update.total:
+                first += f"   ·   {100.0 * update.index / update.total:.0f}%"
+            second = f"Frame {update.index:,}" + (f" of {update.total:,}" if update.total else "") + f"   ·   {speed}"
+            if self._convert_fps and update.fps:
+                second += f"   ·   {update.fps / self._convert_fps:.2f}x real time"
+            lines = [first, second]
+            if self._convert_note:
+                lines.append(self._convert_note)
+            if page.output_path is not None:
+                lines.append(f"Saving to {page.output_path.name}")
+            page.preview.set_converting(lines)
             if update.preview is not None:
                 page.preview.set_images([(np.clip(update.preview, 0, 1) * 255).astype(np.uint8)],
                                         f"Converting · frame {update.index}", False)
         elif update.stage == "muxing":
             page.info_label.setText("Adding audio…")
+            page.preview.set_converting([update.message or "Adding the sound...",
+                                         f"Elapsed {_short_duration(time.monotonic() - self._convert_began)}"])
 
     def _teardown(self) -> None:
         if self._thread is not None:
@@ -1891,6 +1915,7 @@ class MainWindow(QMainWindow):
         self._worker = None
         self._converting = False
         page = self.video_page
+        page.preview.set_converting(None)
         page.start.setEnabled(page.source is not None)
         page.pick_video.setEnabled(True)
         page.pick_disc.setEnabled(True)
