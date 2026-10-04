@@ -17,6 +17,7 @@ The session, media and the headset probe are passed in so the logic can be teste
 from __future__ import annotations
 
 import threading
+import time
 from pathlib import Path
 
 from PySide6.QtCore import QObject, QTimer, Signal
@@ -25,10 +26,16 @@ from . import NO_HEADSET, headset_present
 from .rooms import PLAIN
 from . import available as vr_available
 from . import room as roommod
+from .log import log as vrlog
 
 #: Words in an audio device's name that mean "this is the headset's" (Meta Link, Rift, SteamVR headsets, Windows Mixed Reality).
 AUDIO_HINTS = ("oculus", "meta quest", "quest", "rift", "valve index", "index hmd", "vive", "mixed reality", "hmd")
 WATCH_SECONDS = 5
+#: How long the runtime gets to accept a session (an instance, a session and a graphics context) before the start is given up on and
+#: the person is told. Waiting for the *headset* (putting it on, waking it) is a different thing and never times out.
+START_TIMEOUT = 40
+#: How long a session that was asked to stop gets to do it before it is cut loose and a new one may be made.
+STOP_PATIENCE = 12
 
 
 def qt_audio_outputs() -> list:
@@ -47,7 +54,7 @@ def headset_audio_index(devices: list) -> int | None:
 
 
 class VRController(QObject):
-    state_changed = Signal(str)             # "off" | "starting" | "waiting" | "worn"
+    state_changed = Signal(str)             # "off" | "starting" (asking the runtime) | "waiting" (connected, headset not on) | "worn" | "stopping"
     notice = Signal(str)                    # a line for the status bar
     seats_changed = Signal(list)            # [(name, label)] once a room is loaded
     failed = Signal(str)
@@ -73,6 +80,14 @@ class VRController(QObject):
         self._timer.setInterval(WATCH_SECONDS * 1000)
         self._timer.timeout.connect(self._poll)
         self._probed.connect(self._on_probed)
+        self._start_timer = QTimer(self)               # the runtime must accept the session within START_TIMEOUT
+        self._start_timer.setSingleShot(True)
+        self._start_timer.setInterval(START_TIMEOUT * 1000)
+        self._start_timer.timeout.connect(self._on_start_timeout)
+        self._stop_timer = QTimer(self)                # polls a stopping session; stopping never blocks the window
+        self._stop_timer.setInterval(150)
+        self._stop_timer.timeout.connect(self._check_stopped)
+        self._stop_clock = 0.0
         self.session = None
         self.media = None
         self.room: roommod.Room | None = None
@@ -118,6 +133,8 @@ class VRController(QObject):
         self.media = self._media_factory(self)
         self.session = self._session_factory(self.media, self)
         self.session.worn_changed.connect(self._on_worn)
+        if hasattr(self.session, "connected"):
+            self.session.connected.connect(self._on_connected)
         self.session.failed.connect(self._on_failed)
         self.session.stopped.connect(self._on_stopped)
         self.session.menu_action.connect(self._on_menu_action)
@@ -167,8 +184,20 @@ class VRController(QObject):
         if self.session is not None and hasattr(self.session, "set_rooms"):
             self.session.set_rooms(self._room_tiles, self.room_key())
 
+    def start_vr(self) -> bool:
+        """The Start VR button: begin a session now, whatever automatic watching did or did not do.
+
+        Forgets an earlier failure (which had paused watching), and says so if the last session is still closing.
+        """
+        vrlog("Start VR pressed")
+        self._paused = False
+        return self.start()
+
     def start(self) -> bool:
         """Start the headset session (once). False, with a notice, if VR is not available on this computer."""
+        if self.state == "stopping":
+            self.notice.emit("VR is still closing from last time - give it a few seconds, then start it again.")
+            return False
         if not self.available() and self._session_factory is None:
             self.notice.emit("VR is not available: it needs Windows, an OpenXR runtime (Meta Link, SteamVR or "
                              "Virtual Desktop) and the VR components.")
@@ -183,20 +212,68 @@ class VRController(QObject):
             self._applied_room_key = self.room_key()
             self.seats_changed.emit(self.session.seat_names())
         if not self.session.running:
+            vrlog("starting a session")
             self._set_state("starting")
+            self._start_timer.start()
             self.session.start()
         return True
 
-    def stop(self) -> None:
-        """Leave VR. Watching pauses, so the app does not pull the person straight back in; asking for VR again resumes it."""
+    def stop(self, blocking: bool = False) -> None:
+        """Leave VR. Watching pauses, so the app does not pull the person straight back in; asking for VR again resumes it.
+
+        The window is never held up waiting for the headset: the session is asked to stop and polled until it has (state
+        "stopping" meanwhile). ``blocking`` is for quitting the app, which waits a few seconds so the runtime is left clean.
+        """
+        vrlog("stop requested")
         self._paused = True
+        self._start_timer.stop()
         if self.session is not None:
-            self.session.stop()
+            self.session.stop(wait=5.0 if blocking else 0)
         if self.media is not None:
             self.media.close(wait=True)
         self._worn = False
         self._wants_play = False
+        if blocking or self.session is None or not self.session.running:
+            self._stop_timer.stop()
+            self._set_state("off")
+        else:
+            self._stop_clock = time.monotonic()
+            self._set_state("stopping")
+            self._stop_timer.start()
+
+    def _check_stopped(self) -> None:
+        if self.session is None or not self.session.running:
+            self._stop_timer.stop()
+            self._set_state("off")
+        elif time.monotonic() - self._stop_clock > STOP_PATIENCE:
+            self._stop_timer.stop()
+            self._abandon_session("did not close")
+
+    def _on_start_timeout(self) -> None:
+        """The runtime never accepted the session (it is hung, or the headset software is not running)."""
+        if self.state != "starting":
+            return
+        vrlog(f"the runtime did not accept a session within {START_TIMEOUT} s")
+        self._paused = True
+        self.failed.emit(f"The VR runtime did not answer within {START_TIMEOUT} seconds. Check that Meta Quest Link (or SteamVR) is "
+                         "running and shows your headset as connected, then press Start VR again.")
+        self.notice.emit("VR did not start.")
+        self.stop()
+
+    def _abandon_session(self, why: str) -> None:
+        """A session thread that will not end (stuck inside the runtime): let go of it so a fresh one can be made."""
+        vrlog(f"abandoning the session: {why}")
+        session = self.session
+        if session is not None:
+            for name in ("worn_changed", "connected", "failed", "stopped", "menu_action"):
+                try:
+                    getattr(session, name).disconnect()
+                except Exception:  # noqa: BLE001 - a stand-in without the signal, or already disconnected
+                    pass
+        self.session = self.media = None
+        self._applied_room_key = None
         self._set_state("off")
+        self.notice.emit("The last VR session did not close. If VR will not start, close this app and open it again.")
 
     # -- showing a video ------------------------------------------------------------------------------
 
@@ -365,7 +442,17 @@ class VRController(QObject):
 
     # -- the session's events (arrive on the UI thread) -----------------------------------------------
 
+    def _on_connected(self) -> None:
+        """The runtime accepted the session. From here on it is the headset's turn (putting it on can take as long as it takes)."""
+        self._start_timer.stop()
+        vrlog("runtime connected")
+        if self.state == "starting":
+            self._set_state("waiting")
+            self.notice.emit("VR is ready - put the headset on.")
+
     def _on_worn(self, worn: bool) -> None:
+        self._start_timer.stop()
+        vrlog(f"headset {'on' if worn else 'off'}")
         self._worn = worn
         self._set_state("worn" if worn else "waiting")
         if worn:
@@ -378,6 +465,8 @@ class VRController(QObject):
             self.media.pause()                            # taking the headset off pauses the film
 
     def _on_failed(self, message: str) -> None:
+        self._start_timer.stop()
+        vrlog(f"failed: {message}")
         if self._watching and message == NO_HEADSET:
             self._set_state("off")                        # quietly waiting for a headset: not an error, try again soon
             return
@@ -387,5 +476,8 @@ class VRController(QObject):
         self._set_state("off")
 
     def _on_stopped(self) -> None:
+        self._start_timer.stop()
+        self._stop_timer.stop()
+        vrlog("session ended")
         self._worn = False
         self._set_state("off")

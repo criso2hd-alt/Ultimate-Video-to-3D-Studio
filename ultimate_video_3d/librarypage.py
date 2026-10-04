@@ -176,6 +176,8 @@ class LibraryPage(QWidget):
 
     message = Signal(str)                    # a line for the window's status bar
     vr_requested = Signal(object)            # the entry to play in the headset
+    vr_start_requested = Signal()            # the Start VR button, with the headset session off
+    vr_stop_requested = Signal()             # the same button while a session is starting or running
 
     def __init__(self, library: lib.Library, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -300,6 +302,22 @@ class LibraryPage(QWidget):
         self.caption.setObjectName("hint")
         self.caption.setWordWrap(True)
         right.addWidget(self.caption)
+
+        # Starting VR is its own, plain step: automatic start-up is a convenience that depends on the runtime behaving.
+        vr_row = QHBoxLayout()
+        self.vr_start = QPushButton("Start VR")
+        self.vr_start.setMinimumWidth(110)
+        self.vr_start.setToolTip("Connect to your VR headset. When it says it is ready, put the headset on and pick a video there "
+                                 "(or choose one here and press Play in VR).")
+        self.vr_start.clicked.connect(self._vr_start_clicked)
+        vr_row.addWidget(self.vr_start)
+        self.vr_state = QLabel("")
+        self.vr_state.setObjectName("hint")
+        self.vr_state.setWordWrap(True)
+        vr_row.addWidget(self.vr_state, 1)
+        right.addLayout(vr_row)
+        self._vr_session_state = "off"
+        self.set_vr_state("off")
 
         actions = QHBoxLayout()
         self.folder_button = QPushButton("Show in folder")
@@ -527,10 +545,37 @@ class LibraryPage(QWidget):
         """The Play in VR button is always there; it is faded out, with the reason as its tooltip, when this computer
         cannot do VR (the window says so). A headset that is merely not connected is reported when it is clicked."""
         self._vr_available = available
+        self.set_vr_state(self._vr_session_state, reason)
         self.vr_button.setToolTip(
             "Watch this video in your VR headset (put the headset on when it says so)." if available
             else reason or "VR is not available on this computer.")
         self._selected(self.selected_entry())
+
+    #: what the Start VR button and the line beside it say for each state of the headset session
+    VR_STATES = {
+        "off": ("Start VR", "VR is off. Press Start VR, then put your headset on."),
+        "starting": ("Stop VR", "Starting VR... this can take up to half a minute."),
+        "waiting": ("Stop VR", "VR is ready. Put your headset on."),
+        "worn": ("Stop VR", "You are in the headset."),
+        "stopping": ("Closing...", "Closing VR..."),
+    }
+
+    def set_vr_state(self, state: str, reason: str = "") -> None:
+        """Show the headset session's state on the Start VR button and beside it."""
+        self._vr_session_state = state
+        label, text = self.VR_STATES.get(state, self.VR_STATES["off"])
+        if not self._vr_available:
+            label, text = "Start VR", reason or "VR is not available on this computer."
+        self.vr_start.setText(label)
+        self.vr_start.setEnabled(self._vr_available and state != "stopping")
+        self.vr_state.setText(text)
+
+    def _vr_start_clicked(self) -> None:
+        if self._vr_session_state == "off":
+            self.player.pause()
+            self.vr_start_requested.emit()
+        else:
+            self.vr_stop_requested.emit()
 
     def _play_in_vr(self) -> None:
         entry = self.selected_entry()

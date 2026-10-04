@@ -167,3 +167,54 @@ def test_square_pixels_are_left_alone():
     assert video.display_width(1920, None) == 1920
     assert video.display_width(1920, Fraction(1, 1)) == 1920
     assert video.display_width(720, Fraction(32, 27)) == 854
+
+
+# --- speed work: the same pictures, less copying -----------------------------------------------
+
+
+def _planes_from_swscale(rgb8: np.ndarray) -> np.ndarray:
+    frame = av.VideoFrame.from_ndarray(np.ascontiguousarray(rgb8), format="rgb24")
+    frame = frame.reformat(format="yuv420p", dst_colorspace="ITU709", dst_color_range="MPEG", src_color_range="JPEG")
+    return frame.to_ndarray()
+
+
+def test_the_fast_rgb_to_yuv_kernel_matches_swscale():
+    from ultimate_video_3d import stereo
+
+    rgb = np.clip(_frame(3, 320, 180) * 255 + 0.5, 0, 255).astype(np.uint8)
+    rgb[:, :16] = 0
+    rgb[:, 16:32] = 255                                          # the extremes land on 16 and 235, not clipped differently
+    ours = stereo.rgb_to_yuv420(rgb).astype(np.int16)
+    theirs = _planes_from_swscale(rgb).astype(np.int16)
+    assert ours.shape == theirs.shape
+    luma = 180
+    assert np.abs(ours[:luma] - theirs[:luma]).mean() < 0.7 and np.abs(ours[:luma] - theirs[:luma]).max() <= 3
+    assert np.abs(ours[luma:] - theirs[luma:]).mean() < 1.5       # chroma differs a little: the filters are not the same
+
+
+def test_the_writer_gives_the_same_picture_with_or_without_the_fast_path(tmp_path, monkeypatch):
+    fam = encoders.FAMILIES_BY_KEY["h264"]
+    rgb = np.clip(_frame(2) * 255 + 0.5, 0, 255).astype(np.uint8)
+    frames = {}
+    for name, off in (("fast", False), ("slow", True)):
+        monkeypatch.setattr(video, "_NO_DIRECT_YUV", off)
+        path = tmp_path / f"{name}.mp4"
+        writer = video.VideoWriter(path, fam, "libx264", 24.0, (320, 180), 95)
+        for _ in range(6):
+            writer.write(rgb)
+        writer.close()
+        frames[name] = next(f for _, f in video.frames(path, 0, 1))
+    assert np.abs(frames["fast"] - frames["slow"]).mean() < 0.01
+
+
+def test_a_ring_of_pictures_is_reused_and_holds_the_right_frames(tmp_path):
+    clip = tmp_path / "c.mp4"
+    _make_clip(clip, frames=12, audio=False)
+    plain = [f.copy() for _, f in video.frames(clip)]
+    seen = []
+    ids = set()
+    for _, f in video.frames(clip, ring=3):
+        ids.add(id(f))
+        seen.append(f.copy())                                    # a frame is only valid until the ring wraps
+    assert len(ids) == 3 and len(seen) == len(plain)
+    assert all(np.array_equal(a, b) for a, b in zip(seen, plain))

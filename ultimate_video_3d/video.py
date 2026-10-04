@@ -25,7 +25,10 @@ from pathlib import Path
 
 import numpy as np
 
-from . import encoders
+from . import encoders, stereo
+
+#: set to switch the fast RGB -> YUV path off (tests compare it against swscale)
+_NO_DIRECT_YUV = False
 
 Progress = Callable[[str], None]
 
@@ -350,7 +353,8 @@ def _src_matrix(frame) -> str:
     return "ITU709" if frame.height >= 720 else "ITU601"
 
 
-def frame_to_rgb(frame, high_bit_depth: bool, size: tuple[int, int] | None = None, sar=None) -> np.ndarray:
+def frame_to_rgb(frame, high_bit_depth: bool, size: tuple[int, int] | None = None, sar=None,
+                 out: np.ndarray | None = None) -> np.ndarray:
     """One decoded frame as float32 RGB in [0, 1], still in its transfer curve.
 
     The values are *encoded* (gamma / PQ / HLG), not linear: warping and
@@ -363,6 +367,9 @@ def frame_to_rgb(frame, high_bit_depth: bool, size: tuple[int, int] | None = Non
 
     ``sar`` is the stream's pixel aspect ratio (a decoded frame does not carry it): when it is not square and
     no ``size`` is given, the frame is scaled to its true width.
+
+    ``out`` is a float32 picture of the right shape to fill instead of allocating one: a fresh 1080p float picture
+    costs ~8 ms of page faults on top of the conversion (measured), and a conversion makes one per frame.
     """
     full = int(frame.color_range or 0) == _RANGE_FULL
     kwargs = {
@@ -381,9 +388,12 @@ def frame_to_rgb(frame, high_bit_depth: bool, size: tuple[int, int] | None = Non
             width, height = height, width          # scale in the stored orientation, rotate after
         kwargs.update(width=width, height=height, interpolation="AREA")
     if high_bit_depth:
-        rgb = frame.to_ndarray(format="rgb48le", **kwargs).astype(np.float32) * np.float32(1.0 / 65535.0)
+        raw, scale = frame.to_ndarray(format="rgb48le", **kwargs), np.float32(1.0 / 65535.0)
     else:
-        rgb = frame.to_ndarray(format="rgb24", **kwargs).astype(np.float32) * np.float32(1.0 / 255.0)
+        raw, scale = frame.to_ndarray(format="rgb24", **kwargs), np.float32(1.0 / 255.0)
+    if out is not None and out.shape == raw.shape and not rotation:
+        return np.multiply(raw, scale, out=out)
+    rgb = np.multiply(raw, scale, dtype=np.float32)
     if rotation:
         rgb = np.rot90(rgb, k=rotation // 90)
     return np.ascontiguousarray(rgb)
@@ -394,11 +404,16 @@ def frames(
     start: int = 0,
     limit: int | None = None,
     should_stop: Callable[[], bool] | None = None,
+    ring: int = 0,
 ) -> Iterator[tuple[int, np.ndarray]]:
     """Yield ``(frame_index, rgb)`` for a range of frames.
 
     Seeks to the keyframe at or before ``start`` rather than decoding from the top,
     so an In point at minute 40 does not cost forty minutes of discarded frames.
+
+    ``ring`` > 0 re-uses that many pictures in turn instead of allocating one per frame: a frame is only valid
+    until ``ring`` more have been yielded, so the caller must have a bound on how many it holds (the conversion's
+    queues do).
     """
     import av
 
@@ -418,6 +433,7 @@ def frames(
             offset = None  # resolved from the first decoded frame's timestamp
         emitted = 0
         index = 0
+        pictures: list[np.ndarray] = []
         for frame in container.decode(stream):
             if offset is None:
                 pts = frame.pts if frame.pts is not None else 0
@@ -430,7 +446,15 @@ def frames(
                 continue
             if limit is not None and emitted >= limit:
                 return
-            yield index, frame_to_rgb(frame, high, sar=sar)
+            target = None
+            if ring > 0:
+                slot = emitted % ring
+                if slot < len(pictures):
+                    target = pictures[slot]
+            rgb = frame_to_rgb(frame, high, sar=sar, out=target)
+            if ring > 0 and target is None and len(pictures) < ring and not getattr(frame, "rotation", 0):
+                pictures.append(rgb)                              # the first ``ring`` frames allocate; after that they are re-used
+            yield index, rgb
             index += 1
             emitted += 1
 
@@ -476,6 +500,8 @@ class VideoWriter:
         if family.key in ("prores",) or (profile and "10" in profile.pix_fmt):
             self._ten_bit = True
         self._pix_fmt = encoders.pixel_format(family, encoder, self._ten_bit, profile)
+        #: 8-bit SDR 4:2:0 is what nearly every export is; it skips swscale (see ``stereo.rgb_to_yuv420``)
+        self._direct_yuv = self._pix_fmt == "yuv420p" and not self._ten_bit and hdr == SDR and not _NO_DIRECT_YUV
         self._container = av.open(str(path), mode="w", options=_container_options(family))
         rate = Fraction(fps).limit_denominator(90000)
         self._stream = self._container.add_stream(encoder, rate=rate)
@@ -527,6 +553,12 @@ class VideoWriter:
                 rgb = (np.clip(rgb, 0.0, 1.0) * top + 0.5).astype(want)
             else:
                 rgb = rgb.astype(want)
+        if self._direct_yuv and rgb.shape[0] % 2 == 0 and rgb.shape[1] % 2 == 0:
+            # Straight to the planes the encoder reads, on every core (swscale does this one thread at a time).
+            frame = self._av.VideoFrame.from_ndarray(stereo.rgb_to_yuv420(rgb, bt2020=False), format="yuv420p")
+            for packet in self._stream.encode(frame):
+                self._container.mux(packet)
+            return
         fmt = "rgb48le" if self._ten_bit else "rgb24"
         frame = self._av.VideoFrame.from_ndarray(np.ascontiguousarray(rgb), format=fmt)
         matrix = "ITU709" if self.hdr == SDR else "BT2020"

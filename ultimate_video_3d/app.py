@@ -709,11 +709,12 @@ class SettingsPage(QWidget):
         self.vr_room_label = QLabel("")
         self.vr_room_label.setObjectName("hint")
         self.vr_room_label.setWordWrap(True)
-        self.vr_auto = QCheckBox("Get ready for my headset when I open the Library")
+        self.vr_auto = QCheckBox("Also look for my headset by itself while the Library is open")
         self.vr_auto.setChecked(settings.vr_auto_connect)
-        self.vr_auto.setToolTip("While the Library is open the app looks for a headset every few seconds and connects to it "
-                                "by itself, so you can put the headset on without touching the keyboard or the mouse. "
-                                "Leaving VR from the headset's menu pauses this until you ask for VR again.")
+        self.vr_auto.setToolTip("Off by default: use the Start VR button in the Library. With this on, the app looks for a headset every "
+                                "few seconds while the Library is open and connects to it by itself. That depends on the headset "
+                                "software behaving, so if starting VR ever fails or sticks, leave this off. "
+                                "Leaving VR from the headset's menu pauses it until you ask for VR again.")
         self.vr_trim = QCheckBox("Cut the black bars off wide films")
         self.vr_trim.setChecked(settings.vr_trim_bars)
         self.vr_trim.setToolTip("Many films are stored as a 16:9 picture with black bars burned in above and below. The VR screen then "
@@ -837,6 +838,9 @@ class MainWindow(QMainWindow):
         self.library_page.set_vr_available(not reason, reason)
         self.vr.failed.connect(self._vr_failed)
         self.library_page.vr_requested.connect(self._play_in_vr)
+        self.library_page.vr_start_requested.connect(self._start_vr)
+        self.library_page.vr_stop_requested.connect(lambda: self.vr.stop())
+        self.vr.state_changed.connect(lambda state: self.library_page.set_vr_state(state, reason))
         self.library_page.space_hook = self._space_for_vr
         QApplication.instance().installEventFilter(self)
         self.tabs.addTab(self.video_page, "Video")
@@ -1985,10 +1989,14 @@ class MainWindow(QMainWindow):
         if self.vr.room is None or str(self.vr.room.folder) != str(self._vr_room_dir() or ""):
             self.vr.use_room(self._vr_room_dir())
         if entry is None:                                    # nothing chosen on the PC: go in and pick from the headset's menu
-            if self.vr.start():
+            if self.vr.start_vr():
                 self.status.showMessage("Put the headset on and pick a video from the menu.", 12000)
             return
         self.vr.show(entry.file, entry.layout, preview=False)
+
+    def _start_vr(self) -> None:
+        """The Library's Start VR button: connect to the headset now (the room is the chosen one), pick the film in the headset."""
+        self._play_in_vr(None)
 
     def _space_for_vr(self) -> bool:
         """Space plays and pauses the video in the headset while one is running. True if it did."""
@@ -2175,7 +2183,7 @@ class MainWindow(QMainWindow):
         self.player.shutdown()
         self.library_page.shutdown()
         self.vr.watch(False)
-        self.vr.stop()
+        self.vr.stop(blocking=True)                      # a few seconds at most, so the runtime is left clean
         self.engine.shutdown()
         if self._monitor is not None:
             self._monitor.close()

@@ -429,6 +429,37 @@ Not yet checked: SteamVR and Virtual Desktop runtimes (`XR_RUNTIME_JSON=<json>` 
 without touching the system setting).
 The runtime prints a lot of its own log to stdout: never parse stdout for results.
 
+## Edge artifacts, conversion speed, and starting VR (2026-10-04)
+
+**Holes at the edges of near objects (`stereo._warp`).** The owner saw black dithery dots in one eye and stretched stripes in the other,
+worse with more 3D strength. Cause: the hole filler mirrored the background texture across a hole, but when the hole was longer than the
+run of picture beside it the mirror ran on into the *next* hole, which is still black at that point (right eye: holes are filled left to
+right, so the right-hand source was always unfilled); and a one- or two-pixel sliver of blended edge squeezed between two holes was taken
+for background and repeated as a stripe. Now: slivers (`SLIVER` = 2) become part of the hole, the fill reflects back and forth *inside* the
+run of real picture (`REACH` = 48), and the invented pixels get a light 1-2-1 smoothing. Reproduce on the old kernel with random-depth rows
+(`test_ragged_depth_leaves_no_black_dots_in_either_eye`); 3 real frames at strength 100 went from ~2,500 stray black pixels to 0.
+**Is the GPU used when converting? Yes - and that is not where the time goes.** Measured on an RTX 4080 with a 1080p H.264 rip, SBS half, h265:
+the encoder is `hevc_nvenc` (`nvidia-smi dmon -s u`: enc 6-11%, dec 0%, SM ~30% = the depth model on DirectML); Task Manager's default GPU graphs
+show 3D/Compute, not the Video Encode engine, so it looks idle. The CPU pays for everything else: decode + YUV->RGB, float conversion, depth
+refinement (cv2), the Numba warp and pack, RGB->YUV for the encoder. What was wasted (all fixed, 11 -> ~20 fps here): a fresh 25 MB float
+picture per frame costs ~8 ms of page faults each (`video.frames(ring=)` re-uses 16 pictures, `stereo.WarpBuffers` keeps the two eyes: the warp
+fell from 35 to ~20 ms), the float conversion was two passes and two temporaries, swscale's RGB->YUV is single-threaded and took 20 ms
+(`stereo.rgb_to_yuv420`, a Numba kernel, 2.3 ms; 8-bit SDR 4:2:0 only, others still use swscale; `video._NO_DIRECT_YUV` switches it off for
+tests), and the progress thumbnail converted the whole packed frame to float before shrinking it. A ring picture is only valid until 16 more
+frames were yielded (the queues hold at most 10 in flight: `pipeline.PICTURE_RING`); a pair made with `WarpBuffers` is overwritten by the next
+call. Not done: hardware *decode* (PyAV 18 has `HWAccel` for d3d11va/cuda; tried - on this 1080p rip it saved 15 CPU-ms of decoding but the
+NV12 download + conversion cost more than that, so it only pays for 4K HEVC; worth an opt-in later), and the preview window itself is CPU:
+decode and render on the CPU, depth on the GPU, painted with QPainter (a QOpenGLWidget would move the last step to the GPU).
+**Starting VR is a button now, not a guess.** The Library has a Start VR / Stop VR button with a status line beside it
+(`LibraryPage.set_vr_state`, fed by `VRController.state_changed`: off, starting, waiting, worn, stopping). Automatic headset watching is
+OFF by default (`vr_auto_connect`, Settings: "Also look for my headset by itself..."). `VRController.start_vr()` clears an earlier failure and
+starts; the runtime has `START_TIMEOUT` (40 s) to accept the session (`VRSession.connected`, emitted when the instance/session/GL context exist) -
+after that the person is told - while waiting for the *headset* never times out. `stop()` no longer blocks the window: state "stopping", polled
+every 150 ms, and a session that has not ended after `STOP_PATIENCE` (12 s) is let go of (`_abandon_session`) so a fresh one can be made;
+`stop(blocking=True)` is for quitting. Everything is written to `vr.log` in the data folder (`vr/log.py`: requests, runtime connect, session
+states, errors with tracebacks, watchdog) - read it first when VR "sticks". LimitReached / GraphicsRequirementsCallMissing / RuntimeFailure
+now say "close other VR apps, check Quest Link, press Start VR again".
+
 ## Planned for 0.2: macOS
 
 macOS is written but untested (0.2 will test it on an Apple Silicon MacBook Pro).

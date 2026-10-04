@@ -70,6 +70,9 @@ class StereoParams:
 
 # --- the kernel ------------------------------------------------------------
 
+SLIVER = 2          # a run of picture this short between two holes is edge fringe, not picture
+REACH = 48          # how far into the background the hole filler looks for texture to reflect
+
 
 @njit(parallel=True, fastmath=True, cache=True, nogil=True)
 def _warp(src, depth, shift, out, hole, edge_thresh):
@@ -81,6 +84,7 @@ def _warp(src, depth, shift, out, hole, edge_thresh):
     for y in prange(height):
         zbuf = np.full(width, -1e9, np.float32)
         filled = np.zeros(width, np.uint8)
+        hole[y, :] = 0                       # ``out`` and ``hole`` may be re-used from the last frame: every pixel is rewritten here
 
         for x in range(width):
             s0 = shift[y, x]
@@ -118,8 +122,25 @@ def _warp(src, depth, shift, out, hole, edge_thresh):
                     for c in range(3):
                         out[y, tx, c] = src[y, x, c] + f * (src[y, x + 1, c] - src[y, x, c])
 
-        # Fill each hole from its background side by mirroring the texture there,
-        # which reads far more naturally than stretching a single edge pixel.
+        # A sliver of picture (one or two pixels) squeezed between two holes is not picture, it is the
+        # blended edge of an object that moved away: the filler used to take it for background and
+        # repeat it as a stripe. Treat it as part of the hole.
+        x = 0
+        while x < width:
+            if not filled[x]:
+                x += 1
+                continue
+            a = x
+            while x < width and filled[x]:
+                x += 1
+            if x - a <= SLIVER and a > 0 and x < width:        # [a, x) is a short run with a hole on each side
+                for tx in range(a, x):
+                    filled[tx] = 0
+
+        # Fill each hole from its background side with the texture there, reflected back and forth
+        # inside the run of real picture next to the hole. It never reads another hole (which is
+        # still black at this point: copying from one was the black dots in the right eye), and it
+        # reads far more naturally than stretching a single edge pixel.
         x = 0
         while x < width:
             if filled[x]:
@@ -137,22 +158,37 @@ def _warp(src, depth, shift, out, hole, edge_thresh):
             elif not have_left and not have_right:
                 for tx in range(a, b + 1):
                     hole[y, tx] = 1
+                    for c in range(3):
+                        out[y, tx, c] = 0.0
                 continue
             length = b - a + 1
+            # how many pixels of real picture lie beyond the hole on the background side
+            run = 0
+            if use_left:
+                while a - 1 - run >= 0 and filled[a - 1 - run] and run < REACH:
+                    run += 1
+            else:
+                while b + 1 + run < width and filled[b + 1 + run] and run < REACH:
+                    run += 1
             for i in range(length):
+                j = i % (2 * run)
+                if j >= run:
+                    j = 2 * run - 1 - j                    # bounce back instead of running into the next hole
                 if use_left:
-                    sx = a - 1 - i
-                    if sx < 0:
-                        sx = 0
+                    sx = a - 1 - j
                     dx = a + i
                 else:
-                    sx = b + 1 + i
-                    if sx > width - 1:
-                        sx = width - 1
+                    sx = b + 1 + j
                     dx = b - i
                 for c in range(3):
                     out[y, dx, c] = out[y, sx, c]
                 hole[y, dx] = 1
+        # The reflected fill is smoothed a little across the hole, so a high-contrast edge that was
+        # reflected does not show as a pattern; only invented pixels are touched.
+        for x in range(1, width - 1):
+            if hole[y, x] and not filled[x]:
+                for c in range(3):
+                    out[y, x, c] = (out[y, x - 1, c] + 2.0 * out[y, x, c] + out[y, x + 1, c]) * 0.25
 
 
 @njit(parallel=True, fastmath=True, cache=True, nogil=True)
@@ -184,7 +220,29 @@ class Pair:
     source: np.ndarray          # the unshifted picture the pair was made from
 
 
-def synthesize(rgb: np.ndarray, depth: np.ndarray, params: StereoParams) -> Pair:
+class WarpBuffers:
+    """Output pictures for :func:`synthesize` that are kept from one frame to the next.
+
+    A fresh 1080p float picture is 25 MB and the operating system has to hand over zeroed memory for each one: for
+    the two eyes that was 15 ms a frame, more than the warp itself (measured), and it kept every core busy doing
+    nothing useful. A conversion packs each pair at once and never keeps it, so it can use the same two pictures
+    every time. The pair returned *is* these buffers: use it before the next call.
+    """
+
+    def __init__(self) -> None:
+        self._shape: tuple | None = None
+        self._pictures: list[np.ndarray] = []
+        self._holes: list[np.ndarray] = []
+
+    def get(self, shape: tuple) -> tuple[list[np.ndarray], list[np.ndarray]]:
+        if self._shape != shape:
+            self._pictures = [np.empty(shape, np.float32) for _ in range(2)]
+            self._holes = [np.empty(shape[:2], np.uint8) for _ in range(2)]
+            self._shape = shape
+        return self._pictures, self._holes
+
+
+def synthesize(rgb: np.ndarray, depth: np.ndarray, params: StereoParams, buffers: WarpBuffers | None = None) -> Pair:
     """Left and right views of ``rgb`` (float32 HxWx3) given ``depth`` (HxW, 1 = near).
 
     Each eye is moved half the disparity, in opposite directions, so the centre
@@ -195,11 +253,12 @@ def synthesize(rgb: np.ndarray, depth: np.ndarray, params: StereoParams) -> Pair
     height, width = depth.shape
     edge = max(0.75, 0.0006 * width)   # a per-pixel disparity step this large is an object edge, not a slope
     outs = []
+    pictures, holes = buffers.get(rgb.shape) if buffers is not None else (None, None)
     with LOCK:
         disp = disparity_map(depth, params, width)
-        for sign in (+0.5, -0.5):
-            out = np.zeros_like(rgb)
-            hole = np.zeros((height, width), np.uint8)
+        for i, sign in enumerate((+0.5, -0.5)):
+            out = pictures[i] if pictures is not None else np.empty_like(rgb)
+            hole = holes[i] if holes is not None else np.empty((height, width), np.uint8)
             _warp(rgb, depth, np.ascontiguousarray(disp * np.float32(sign)), out, hole, np.float32(edge))
             outs.append((out, hole))
     (left, hole_l), (right, hole_r) = outs
@@ -387,3 +446,55 @@ def pack_frame(layout_key: str, pair: Pair | None, rgb: np.ndarray, depth: np.nd
         _pack(np.ascontiguousarray(left), np.ascontiguousarray(right), np.ascontiguousarray(rgb),
               np.ascontiguousarray(d, np.float32), mode, _DUBOIS, out, np.float32(top))
     return out
+
+
+# --- straight to the encoder's own pixel format ---------------------------------
+
+
+@njit(parallel=True, fastmath=True, cache=True, nogil=True)
+def _rgb_to_yuv420(rgb, out, kr, kb):
+    """8-bit full-range RGB -> planar 4:2:0 YCbCr in limited ("TV") range, all cores, one pass.
+
+    ``out`` is the three planes back to back (Y, then U, then V); ``kr`` and ``kb`` pick the matrix (0.2126/0.0722
+    for BT.709). Chroma is the mean of each 2x2 block.
+    """
+    h, w, _ = rgb.shape
+    hh, hw = h // 2, w // 2
+    u0 = h * w
+    v0 = u0 + hh * hw
+    kg = 1.0 - kr - kb
+    cb_scale = 224.0 / (255.0 * 2.0 * (1.0 - kb))
+    cr_scale = 224.0 / (255.0 * 2.0 * (1.0 - kr))
+    y_scale = 219.0 / 255.0
+    for by0 in prange(hh):
+        by = np.int64(by0)
+        for bx in range(hw):
+            cb = 0.0
+            cr = 0.0
+            for dy in range(2):
+                for dx in range(2):
+                    y = by * 2 + dy
+                    x = bx * 2 + dx
+                    r = np.float32(rgb[y, x, 0])
+                    g = np.float32(rgb[y, x, 1])
+                    b = np.float32(rgb[y, x, 2])
+                    luma = kr * r + kg * g + kb * b
+                    out[y * w + x] = min(max(16.0 + y_scale * luma + 0.5, 0.0), 255.0)
+                    cb += (b - luma) * cb_scale
+                    cr += (r - luma) * cr_scale
+            out[u0 + by * hw + bx] = min(max(128.0 + 0.25 * cb + 0.5, 0.0), 255.0)
+            out[v0 + by * hw + bx] = min(max(128.0 + 0.25 * cr + 0.5, 0.0), 255.0)
+
+
+def rgb_to_yuv420(rgb: np.ndarray, bt2020: bool = False) -> np.ndarray:
+    """``rgb`` (uint8 HxWx3, even sides) as an I420 buffer shaped (H*3/2, W), ready for ``VideoFrame.from_ndarray``.
+
+    This replaces swscale's single-threaded RGB -> YUV conversion (20 ms a 1080p frame, measured) with a kernel that
+    uses every core (a few ms); the encoder then gets the planes it wants with no further conversion.
+    """
+    h, w, _ = rgb.shape
+    out = np.empty(h * w * 3 // 2, np.uint8)
+    kr, kb = (0.2627, 0.0593) if bt2020 else (0.2126, 0.0722)
+    with LOCK:
+        _rgb_to_yuv420(np.ascontiguousarray(rgb), out, np.float32(kr), np.float32(kb))
+    return out.reshape(h * 3 // 2, w)

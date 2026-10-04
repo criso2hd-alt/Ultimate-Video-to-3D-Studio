@@ -60,11 +60,15 @@ class FakeVR:
     def set_videos(self, tiles):
         self.calls.append(("videos", len(tiles)))
 
-    def stop(self):
+    def stop(self, blocking=False):
         self.calls.append("stop")
 
     def start(self):
         self.calls.append("start")
+        return True
+
+    def start_vr(self):
+        self.calls.append("start_vr")
         return True
 
     def watch(self, on):
@@ -212,7 +216,7 @@ def test_play_in_vr_with_nothing_selected_goes_in_and_leaves_the_choice_to_the_h
     page.vr_button.click()
     assert asked == [None]
     win._play_in_vr(None)
-    assert "start" in win.vr.calls and not any(isinstance(c, tuple) and c[0] == "show" for c in win.vr.calls)
+    assert "start_vr" in win.vr.calls and not any(isinstance(c, tuple) and c[0] == "show" for c in win.vr.calls)
     assert ("videos", 1) in win.vr.calls                                       # the Library was handed to the headset's menu
 
 
@@ -297,3 +301,17 @@ def test_the_plain_room_can_be_chosen_and_stays_chosen(win, tmp_path):
     assert win.settings.vr_room_dir == PLAIN and win._vr_room_dir() is None         # no baked room: the plain built-in one
     win._vr_room_chosen(str(tmp_path / "rooms" / "home_theatre"))                   # and back again
     assert win._vr_room_dir() == tmp_path / "rooms" / "home_theatre"
+
+
+def test_the_start_vr_button_connects_without_choosing_a_video_and_stop_vr_leaves(win):
+    page = win.library_page
+    page.set_vr_available(True)
+    page.vr_start.click()
+    assert "start_vr" in win.vr.calls and not any(isinstance(c, tuple) and c[0] == "show" for c in win.vr.calls)
+    page.set_vr_state("waiting")
+    page.vr_start.click()
+    assert "stop" in win.vr.calls
+
+
+def test_automatic_headset_watching_is_off_unless_the_person_turns_it_on(win):
+    assert win.settings.vr_auto_connect is False and not win.settings_page.vr_auto.isChecked()

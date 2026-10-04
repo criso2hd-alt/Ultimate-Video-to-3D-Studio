@@ -31,3 +31,4 @@ docs/room-template/*.blend1
 docs/room-template/*backup*.blend
 docs/room-template/Textures/
 room-build/
+release_next/

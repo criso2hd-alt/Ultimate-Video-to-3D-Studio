@@ -495,3 +495,72 @@ def test_choosing_another_room_does_hand_it_over_and_a_room_that_fails_leaves_yo
     assert vr.use_room(tmp_path) is False                                       # a folder with no room.glb
     assert vr.room is kept and vr.room_key() == str(tmp_path / "one")           # a room that fails to load leaves you where you are
     assert vr.session.rooms == before
+
+
+# --- starting VR on purpose, and never getting stuck (the Start VR button) ---------------------------------------
+
+
+class StickySession(FakeSession):
+    """A session that, once asked to stop, takes its time (as one stuck inside the runtime would)."""
+
+    connected = Signal()
+    started = Signal()
+
+    def stop(self, wait=5.0):
+        self.stop_asked = True                                    # still running: the thread has not noticed
+
+
+def test_start_vr_goes_ahead_even_after_a_failure_paused_watching(vr):
+    vr._on_failed("LimitReachedError: boom")                     # a real failure pauses the automatic retrying
+    assert vr._paused
+    assert vr.start_vr() is True and not vr._paused and vr.state == "starting"
+
+
+def test_the_runtime_has_a_limited_time_to_accept_the_session_and_the_person_is_told(qapp):
+    controller = VRController(session_factory=StickySession, media_factory=FakeMedia)
+    messages = []
+    controller.failed.connect(messages.append)
+    controller.start_vr()
+    assert controller._start_timer.isActive() and controller.state == "starting"
+    controller._on_start_timeout()                               # the timer firing
+    assert messages and "did not answer" in messages[0] and "Start VR" in messages[0]
+    assert controller.state == "stopping"                        # asked to stop; the stuck thread is polled, not waited for
+
+
+def test_a_connected_session_waits_for_the_headset_without_any_time_limit(qapp):
+    controller = VRController(session_factory=StickySession, media_factory=FakeMedia)
+    controller.start_vr()
+    controller.session.connected.emit()
+    assert controller.state == "waiting" and not controller._start_timer.isActive()
+    controller._on_start_timeout()                               # a late timer does nothing once connected
+    assert controller.state == "waiting"
+
+
+def test_stopping_does_not_block_and_a_session_that_will_not_end_is_let_go_of(qapp):
+    controller = VRController(session_factory=StickySession, media_factory=FakeMedia)
+    controller.start_vr()
+    first = controller.session
+    controller.session.running = True
+    controller.stop()
+    assert controller.state == "stopping"
+    assert controller.start() is False                           # not while it is closing
+    controller._stop_clock -= 60                                 # it has had more than enough time
+    controller._check_stopped()
+    assert controller.state == "off" and controller.session is None
+    assert controller.start_vr() is True and controller.session is not first      # a fresh session
+
+
+def test_stopping_a_session_that_ends_at_once_goes_straight_to_off(vr):
+    vr.start_vr()
+    vr.stop()
+    assert vr.state == "off"
+
+
+def test_the_vr_diary_records_what_happened(vr, tmp_path, monkeypatch):
+    from ultimate_video_3d.vr import log as vrlog
+
+    monkeypatch.setattr(vrlog, "_path", lambda: tmp_path / "vr.log")
+    vr.start_vr()
+    vr.stop()
+    text = (tmp_path / "vr.log").read_text(encoding="utf8")
+    assert "Start VR pressed" in text and "starting a session" in text and "stop requested" in text

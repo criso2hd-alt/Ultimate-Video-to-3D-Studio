@@ -188,3 +188,23 @@ def test_changing_the_layout_updates_the_entry(page, qapp, sbs_clip):
     entry = page.library.entries[0]
     page._set_layout(entry, "tb_half")
     assert page.library.entries[0].layout == "tb_half" and "Top-and-Bottom" in page.grid.item(0).text()
+
+
+def test_the_start_vr_button_follows_the_session_and_asks_for_start_or_stop(page):
+    page.set_vr_available(True)
+    asked = []
+    page.vr_start_requested.connect(lambda: asked.append("start"))
+    page.vr_stop_requested.connect(lambda: asked.append("stop"))
+    assert page.vr_start.text() == "Start VR" and "Press Start VR" in page.vr_state.text()
+    page.vr_start.click()
+    page.set_vr_state("starting")
+    assert page.vr_start.text() == "Stop VR" and "Starting" in page.vr_state.text()
+    page.vr_start.click()
+    page.set_vr_state("waiting")
+    assert "Put your headset on" in page.vr_state.text()
+    page.set_vr_state("stopping")
+    assert not page.vr_start.isEnabled()
+    page.set_vr_state("off")
+    assert page.vr_start.isEnabled() and asked == ["start", "stop"]
+    page.set_vr_available(False, "No OpenXR runtime is installed.")
+    assert not page.vr_start.isEnabled() and "OpenXR" in page.vr_state.text()

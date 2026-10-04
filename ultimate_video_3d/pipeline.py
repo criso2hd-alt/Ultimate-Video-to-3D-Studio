@@ -32,6 +32,11 @@ Progress = Callable[[str], None]
 
 _DEPTH_EDGE = 640          # longest edge of the copy fed to the depth model
 
+#: Decoded pictures are re-used in turn instead of allocated per frame (saves ~8 ms of page faults each). Must exceed the
+#: most pictures that can be in flight at once: frames queue (4) + the reader's pending one + the depth stage's + depth
+#: queue (3) + the warp thread's = 10.
+PICTURE_RING = 16
+
 
 @dataclass
 class VideoProgress:
@@ -112,7 +117,7 @@ class _Reader(threading.Thread):
             source, start, limit = self._args
             # A title read straight from a disc has its own forward-only decoder (and collects the sound).
             frames = (source.frames(start, limit, should_stop=self.stop.is_set) if hasattr(source, "frames")
-                      else video.frames(source, start, limit, should_stop=self.stop.is_set))
+                      else video.frames(source, start, limit, should_stop=self.stop.is_set, ring=PICTURE_RING))
             for item in frames:
                 while not self.stop.is_set():
                     try:
@@ -328,6 +333,7 @@ def convert_video(
     skip = preroll
     began = time.monotonic()
     stopped = False
+    buffers = stereo.WarpBuffers()           # the two eyes are packed at once and never kept, so they can share their memory
     try:
         while True:
             item = depth_queue.get()
@@ -349,7 +355,7 @@ def convert_video(
                 d = depthmod.refine(steady, frame, threed.edge_aware, threed.depth_blur / 100.0 * 6.0, refine_mode, refine_work)
 
             graded = grader.apply(frame, settings.colour, signal) if settings.colour.active else frame
-            pair = stereo.synthesize(graded, d, params) if threed.enabled else None
+            pair = stereo.synthesize(graded, d, params, buffers) if threed.enabled else None
             packed = stereo.pack_frame(layout.key if threed.enabled else "copy", pair, graded, d, bits)
 
             async_writer.submit(packed)
@@ -358,7 +364,7 @@ def convert_video(
             elapsed = max(time.monotonic() - began, 1e-3)
             preview = None
             if done % 3 == 0:
-                preview = _shrink(packed.astype(np.float32) / (255.0 if bits == 8 else 65535.0), 640)
+                preview = _shrink(packed, 640).astype(np.float32) / (255.0 if bits == 8 else 65535.0)       # shrink the integers, not a 25 MB float copy
             yield VideoProgress("converting", done, total, produced / elapsed, preview, encoder)
     finally:
         reader.stop.set()

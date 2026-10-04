@@ -210,6 +210,7 @@ def _prefer_srgb_swapchain() -> None:
 
 
 from . import NO_HEADSET, XR_LOCK  # noqa: E402  (shared with the controller, which must not import this OpenGL module)
+from .log import log as vrlog, log_error  # noqa: E402
 
 
 class GuardedContext:
@@ -244,6 +245,10 @@ def friendly_error(error: BaseException) -> str:
     text = f"{type(error).__name__} {error}".lower().replace("_", "")
     if "formfactorunavailable" in text or "runtimeunavailable" in text:
         return NO_HEADSET
+    if "limitreached" in text or "graphicsrequirementscallmissing" in text or "runtimefailure" in text:
+        return (f"The VR runtime would not start a session ({type(error).__name__}). Close any other VR app, check that "
+                "Meta Quest Link (or SteamVR) shows your headset as connected, then press Start VR again. If it keeps "
+                "happening, close this app and open it again.")
     return f"{type(error).__name__}: {error}"
 
 
@@ -253,6 +258,7 @@ class VRSession(QObject):
     state_changed = Signal(str)             # the OpenXR session state's name, e.g. "FOCUSED"
     worn_changed = Signal(bool)             # True once the headset is on (VISIBLE or FOCUSED)
     started = Signal()                      # the loop is running and drawing
+    connected = Signal()                    # the runtime accepted us: an instance, a session and a graphics context exist
     failed = Signal(str)
     stopped = Signal()
     menu_action = Signal(object)            # something the menu asked for that the window must do: video, volume, exit
@@ -356,12 +362,15 @@ class VRSession(QObject):
     # -- the thread -------------------------------------------------------------------------------
 
     def _main(self) -> None:
+        vrlog("session thread started")
         try:
             self._run()
         except Exception as error:  # noqa: BLE001 - reported, never allowed to take the app down
+            log_error("session failed", error)
             self.failed.emit(friendly_error(error))
         finally:
             self.worn = False
+            vrlog("session thread ended")
             self.stopped.emit()
 
     def _run(self) -> None:
@@ -376,8 +385,11 @@ class VRSession(QObject):
             enabled_extension_names=[xr.KHR_OPENGL_ENABLE_EXTENSION_NAME])
         space = xr.ReferenceSpaceCreateInfo(reference_space_type=xr.ReferenceSpaceType.STAGE)
         _prefer_srgb_swapchain()
+        vrlog("connecting to the OpenXR runtime")
         with GuardedContext(ContextObject(context_provider=GLFWOffscreenContextProvider(), instance_create_info=info,
                                           reference_space_create_info=space)) as ctx:
+            vrlog("connected: instance, session and graphics context exist")
+            self.connected.emit()
             inputs = _Inputs(ctx)
             renderer = Renderer()
             renderer.init_gl()
@@ -391,6 +403,7 @@ class VRSession(QObject):
                     break
                 state = ctx.session_state.name
                 if state != last_state:
+                    vrlog(f"session state {state}")
                     last_state = self.state = state
                     self.state_changed.emit(state)
                     worn = state in ("VISIBLE", "FOCUSED")

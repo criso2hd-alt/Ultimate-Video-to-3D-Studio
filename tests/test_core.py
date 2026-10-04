@@ -63,6 +63,25 @@ def test_no_nan_and_holes_are_background_filled():
     assert pair.left.min() > 0.05 and pair.right.min() > 0.05
 
 
+def test_ragged_depth_leaves_no_black_dots_in_either_eye():
+    """Regression: a hole filled from its right side reflected into the *next* hole (still black at that point), which
+    showed as black dithery dots at the edges of near objects, worse with more depth. Every row here is a run of
+    random-depth steps, so holes and short runs of picture alternate; the picture has no black in it."""
+    rng = np.random.default_rng(5)
+    h, w = 40, 400
+    rgb = (0.55 + 0.4 * rng.random((h, w, 1), dtype=np.float32)) * np.ones((1, 1, 3), np.float32)
+    d = np.empty((h, w), np.float32)
+    for y in range(h):
+        x = 0
+        while x < w:
+            step = int(rng.integers(1, 12))
+            d[y, x:x + step] = rng.random()
+            x += step
+    for strength in (30, 60, 100):
+        pair = stereo.synthesize(rgb, d, stereo.StereoParams(strength=strength, convergence=0.55))
+        assert pair.left.max(axis=2).min() > 0.5 and pair.right.max(axis=2).min() > 0.5
+
+
 def test_no_cracks_on_smooth_slope():
     """Regression: a span holding exactly one pixel used to be skipped, leaving 1px cracks."""
     h, w = 40, 400
@@ -71,6 +90,20 @@ def test_no_cracks_on_smooth_slope():
     pair = stereo.synthesize(rgb, d, stereo.StereoParams(strength=60))
     interior = (pair.hole_left | pair.hole_right)[:, 20:-20]
     assert interior.sum() == 0
+
+
+def test_kept_warp_buffers_give_the_same_pair_as_fresh_ones_even_after_a_different_picture():
+    rgb, d = _scene()
+    other, other_d = _scene()
+    other[...] = other[::-1, ::-1]
+    other_d = other_d[::-1, ::-1].copy()
+    params = stereo.StereoParams(strength=70)
+    fresh = stereo.synthesize(rgb, d, params)
+    buffers = stereo.WarpBuffers()
+    stereo.synthesize(other, other_d, params, buffers)           # leaves a different picture, and holes, in the buffers
+    again = stereo.synthesize(rgb, d, params, buffers)
+    assert np.array_equal(again.left, fresh.left) and np.array_equal(again.right, fresh.right)
+    assert np.array_equal(again.hole_left, fresh.hole_left) and np.array_equal(again.hole_right, fresh.hole_right)
 
 
 @pytest.mark.parametrize("layout,shape", [
