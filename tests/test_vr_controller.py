@@ -92,6 +92,7 @@ class FakeSession(QObject):
 
     def set_room(self, room):
         self.rooms.append(room)
+        self.room = room
 
     def seat_names(self):
         return [("Seat_A", "A")]
@@ -344,7 +345,7 @@ def test_without_a_room_to_offer_a_session_starts_in_the_plain_room_as_before(qa
     vr.room_provider = lambda: None
     vr.watch(True)
     assert _wait(qapp, lambda: vr.session is not None and vr.session.running)
-    assert vr.session.rooms == [] and vr.room is None
+    assert vr.session.rooms == [None] and vr.room is None                      # handed over once (the plain room), and never again
     vr.watch(False)
 
 
@@ -469,3 +470,28 @@ def test_the_plain_room_is_a_choice_like_any_other(vr, tmp_path):
     vr._on_menu_action(("room", Tile("Plain room", PLAIN)))
     assert used == [None] and chosen == [PLAIN]                                  # no folder at all: the built-in room
     assert vr.room_key() == PLAIN                                                # and that is how the Rooms page names it before any room is loaded
+
+
+def test_showing_another_video_does_not_move_the_person_back_to_the_first_seat(vr, tmp_path):
+    vr.room, vr._room_folder = object(), tmp_path / "room"                      # a room is loaded (the test does not need its pictures)
+    vr.show(Path("a.mp4"), "sbs_half")
+    vr.show(Path("b.mp4"), "sbs_half")                                          # a new video chosen from the headset's menu
+    vr.show(Path("c.mp4"), "sbs_half")
+    assert vr.session.rooms == [vr.room]                                        # the room was handed over once: set_room puts you back in seat one
+
+
+def test_the_plain_room_is_not_handed_over_again_either_and_picking_the_room_you_are_in_changes_nothing(vr):
+    vr.show(Path("a.mp4"), "sbs_half")
+    vr.show(Path("b.mp4"), "sbs_half")
+    assert vr.session.rooms == [None]
+    assert vr.use_room(None) is True and vr.session.rooms == [None]
+
+
+def test_choosing_another_room_does_hand_it_over_and_a_room_that_fails_leaves_you_in_the_plain_one(vr, tmp_path):
+    kept = object()
+    vr.room, vr._room_folder = kept, tmp_path / "one"
+    vr.start()
+    before = list(vr.session.rooms)
+    assert vr.use_room(tmp_path) is False                                       # a folder with no room.glb
+    assert vr.room is kept and vr.room_key() == str(tmp_path / "one")           # a room that fails to load leaves you where you are
+    assert vr.session.rooms == before

@@ -64,6 +64,7 @@ class VRController(QObject):
         self._audio_outputs_fn = audio_outputs or qt_audio_outputs
         self.audio_choice = ""               # "" = automatic (the headset's device if there is one)
         self._room_tiles: list = []                     # the Rooms page's choices
+        self._applied_room_key: str | None = None       # the room the session has been given (handing it over again would move the person back to the first seat)
         self.room_provider = None                       # () -> the folder of the room to sit in, or None (the app's choice); used when VR starts by itself
         self.trim_bars = True                           # leave a film's burned-in black bars off the screen (the app's settings fill this in)
         self.beam_on, self.beam_level = True, 1.0       # the projector's beam in the room (the app's settings fill these in)
@@ -133,18 +134,24 @@ class VRController(QObject):
 
     def use_room(self, folder: str | Path | None) -> bool:
         """Choose the room to sit in (None for the plain stand-in). Returns False, with a notice, if it cannot be loaded."""
-        self._room_folder = Path(folder) if folder else None
-        if self._room_folder is None:
-            self.room = None
-        else:
+        wanted = Path(folder) if folder else None
+        if wanted is not None and self.room is not None and self._room_folder == wanted and self._applied_room_key == str(wanted):
+            return True                                      # already in it: nothing to load, and nobody is moved
+        if wanted is None and self.room is None and self._room_folder is None and self._applied_room_key == PLAIN:
+            return True
+        loaded = None
+        if wanted is not None:
             try:
-                self.room = roommod.load(self._room_folder)
+                loaded = roommod.load(wanted)
             except roommod.RoomError as error:
-                self.room = None
                 self.notice.emit(f"Could not load the VR room: {error}")
-                return False
+                if self.room is None:
+                    self._room_folder = None                 # nothing was loaded before either: the plain room it is
+                return False                                 # otherwise the person stays in the room they are in
+        self._room_folder, self.room = wanted, loaded
         if self.session is not None:
             self.session.set_room(self.room)
+            self._applied_room_key = self.room_key()
             self.seats_changed.emit(self.session.seat_names())
             if hasattr(self.session, "set_current_room"):
                 self.session.set_current_room(self.room_key())
@@ -171,8 +178,9 @@ class VRController(QObject):
             if folder:
                 self.use_room(folder)
         self._make_parts()
-        if self.room is not None:
+        if self._applied_room_key != self.room_key():       # not on every video: set_room puts the person back in the first seat
             self.session.set_room(self.room)
+            self._applied_room_key = self.room_key()
             self.seats_changed.emit(self.session.seat_names())
         if not self.session.running:
             self._set_state("starting")

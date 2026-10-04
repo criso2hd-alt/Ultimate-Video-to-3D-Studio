@@ -733,15 +733,14 @@ class SettingsPage(QWidget):
         beam_row.addWidget(QLabel("Beam brightness"))
         beam_row.addStretch(1)
         beam_row.addWidget(self.vr_beam_box)
-        self.vr_room_button = QPushButton("Choose a VR room folder…")
-        self.vr_room_button.setObjectName("secondary")
-        self.vr_room_button.setToolTip("A folder with room.glb and room.json (a baked home theatre).")
-        self.vr_room_clear = QPushButton("Use the plain room")
-        self.vr_room_clear.setObjectName("secondary")
+        self.vr_rooms_folder = QPushButton("Open the rooms folder")
+        self.vr_rooms_folder.setObjectName("secondary")
+        self.vr_rooms_folder.setToolTip("Every folder in here that holds a room.glb is a room you can pick in the headset. Put a "
+                                        "thumbnail.jpg in a room's folder to give it a picture.")
         for widget in (self.vr_status, self.vr_auto, self.vr_trim, self.vr_beam):
             vr_card.add(widget)
         vr_card.add_layout(beam_row)
-        for widget in (self.vr_room_label, self.vr_room_button, self.vr_room_clear):
+        for widget in (self.vr_room_label, self.vr_rooms_folder):
             vr_card.add(widget)
         cards.append(vr_card)
 
@@ -1193,8 +1192,7 @@ class MainWindow(QMainWindow):
         self.vr.beam_changed.connect(self._vr_beam_from_headset)
         sp.vr_beam.toggled.connect(self._vr_beam_from_settings)
         sp.vr_beam_box.currentIndexChanged.connect(self._vr_beam_from_settings)
-        sp.vr_room_button.clicked.connect(self._choose_vr_room)
-        sp.vr_room_clear.clicked.connect(self._clear_vr_room)
+        sp.vr_rooms_folder.clicked.connect(self._open_rooms_folder)
         self._refresh_vr_settings()
         sp.open_output.clicked.connect(lambda: open_folder(paths.output_dir()))
         sp.open_luts.clicked.connect(lambda: open_folder(paths.luts_dir()))
@@ -1922,23 +1920,17 @@ class MainWindow(QMainWindow):
         reason = unavailable_reason()
         sp.vr_status.setText("A VR headset can be used on this computer." if not reason else reason)
         room = self._vr_room_dir()
-        sp.vr_room_label.setText(f"Room: {room}" if room else "Room: the plain built-in room.")
+        name = "the plain room"
+        if room is not None:
+            from .vr import rooms as roomsmod
 
-    def _choose_vr_room(self) -> None:
-        chosen = QFileDialog.getExistingDirectory(self, "Choose a VR room folder", self.settings.vr_room_dir or "")
-        if not chosen:
-            return
-        if not (Path(chosen) / "room.glb").is_file():
-            QMessageBox.warning(self, "Not a VR room", "That folder has no room.glb in it.")
-            return
-        self.settings.vr_room_dir = chosen
-        self._refresh_vr_settings()
+            name = next((r.name for r in roomsmod.find_rooms(room.parent) if r.folder == room), room.name)
+        sp.vr_room_label.setText(f"You start in {name}. Pick another room from the Rooms page of the headset's menu; your pick is remembered.")
 
-    def _clear_vr_room(self) -> None:
-        from .vr.rooms import PLAIN
-
-        self.settings.vr_room_dir = PLAIN
-        self._refresh_vr_settings()
+    def _open_rooms_folder(self) -> None:
+        folder = paths.data_dir() / "rooms"
+        folder.mkdir(parents=True, exist_ok=True)
+        open_folder(folder)
 
     def _vr_failed(self, message: str) -> None:
         """The headset session could not start or stopped: say so in a box (a status-bar line is too easy to miss)."""

@@ -150,23 +150,23 @@ def test_the_application_key_filter_takes_space_for_vr_but_never_from_a_text_box
     assert win.eventFilter(win, press) is False                                # no headset playing: Space is left alone
 
 
-def test_a_room_folder_must_hold_a_room_and_is_remembered_in_the_settings(win, tmp_path, monkeypatch):
-    warned = []
-    monkeypatch.setattr(QMessageBox, "warning", lambda *a, **k: warned.append(a))
-    empty = tmp_path / "not_a_room"
-    empty.mkdir()
-    monkeypatch.setattr(appmod.QFileDialog, "getExistingDirectory", lambda *a, **k: str(empty))
-    win._choose_vr_room()
-    assert warned and win.settings.vr_room_dir == ""
-    good = tmp_path / "a_room"
-    good.mkdir()
-    (good / "room.glb").write_bytes(b"x")
-    monkeypatch.setattr(appmod.QFileDialog, "getExistingDirectory", lambda *a, **k: str(good))
-    win._choose_vr_room()
-    assert win.settings.vr_room_dir == str(good) and win._vr_room_dir() == good
-    assert str(good) in win.settings_page.vr_room_label.text()
-    win._clear_vr_room()
-    assert win.settings.vr_room_dir == "plain" and win._vr_room_dir() is None                # the plain built-in room, chosen on purpose
+def test_settings_say_which_room_you_start_in_and_leave_the_choosing_to_the_headset(win, tmp_path, monkeypatch):
+    import json
+
+    sp = win.settings_page
+    assert not hasattr(sp, "vr_room_button") and not hasattr(sp, "vr_room_clear")             # the old room-folder buttons are gone
+    room = tmp_path / "rooms" / "home_theatre"
+    room.mkdir(parents=True)
+    (room / "room.glb").write_bytes(b"x")
+    (room / "room.json").write_text(json.dumps({"name": "Home theatre"}))
+    win._refresh_vr_settings()
+    assert "start in Home theatre" in sp.vr_room_label.text() and "Rooms page" in sp.vr_room_label.text()
+    win._vr_room_chosen("plain")
+    assert "start in the plain room" in sp.vr_room_label.text()
+    opened = []
+    monkeypatch.setattr(appmod, "open_folder", lambda folder: opened.append(folder))
+    sp.vr_rooms_folder.click()
+    assert opened == [tmp_path / "rooms"] and (tmp_path / "rooms").is_dir()
 
 
 def test_a_room_in_the_data_folder_is_found_without_choosing_it(win, tmp_path):
@@ -295,7 +295,5 @@ def test_the_plain_room_can_be_chosen_and_stays_chosen(win, tmp_path):
     assert win._vr_room_dir() == tmp_path / "rooms" / "home_theatre"                # nothing chosen: the first baked room
     win._vr_room_chosen(PLAIN)                                                      # picked on the headset's Rooms page
     assert win.settings.vr_room_dir == PLAIN and win._vr_room_dir() is None         # no baked room: the plain built-in one
-    win.settings.vr_room_dir = str(tmp_path / "rooms" / "home_theatre")
-    win._clear_vr_room()                                                            # Settings > "Use the plain room" means exactly that
-    assert win.settings.vr_room_dir == PLAIN and win._vr_room_dir() is None
-    assert "plain built-in room" in win.settings_page.vr_room_label.text()
+    win._vr_room_chosen(str(tmp_path / "rooms" / "home_theatre"))                   # and back again
+    assert win._vr_room_dir() == tmp_path / "rooms" / "home_theatre"
