@@ -476,8 +476,7 @@ cured): `VRMedia._audio_position` only slews small differences, jumps for big on
 PyOpenGL's per-call error check is off (`vr/__init__.py`): both eyes of the home theatre took 7.7 ms and now 3.9 ms (GPU is not the limit: an
 RTX 4080 draws the room with the lights down and the beam on in 3.9 ms; the rest is Python overhead and GIL pressure). The diary logs fps and
 the feeder's dropped/late frames every 30 s while a film plays. `app._exit_watchdog` ends the process 8 s after the window closes if Python is
-still waiting on a thread - a lingering process kept the VR runtime busy and blocked the next start. Idea from the owner, not built: show the
-whole app window (the Library) on a panel in the headset, driven by the controllers' pointer (render the Qt widget to an image, send mouse events).
+still waiting on a thread - a lingering process kept the VR runtime busy and blocked the next start.
 
 ## Planned for 0.2: macOS
 
