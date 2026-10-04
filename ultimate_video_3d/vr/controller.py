@@ -320,6 +320,12 @@ class VRController(QObject):
         if kind == "video":
             tile = action[1]
             self.show(Path(tile.path), tile.layout, preview=False)
+        elif kind == "skip":
+            if self.media is not None and self.media.is_open:
+                self.media.seek_relative(int(action[1]))
+        elif kind == "seek":
+            if self.media is not None and self.media.is_open and self.media.duration_ms:
+                self.media.seek_ms(int(float(action[1]) * self.media.duration_ms))
         elif kind == "volume":
             self._volume = float(action[1])
             if self.media is not None and hasattr(self.media, "set_volume"):

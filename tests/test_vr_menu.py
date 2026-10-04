@@ -595,3 +595,77 @@ def test_the_beam_choice_made_in_the_headset_reaches_the_window_and_the_picture(
     assert session.beam_on is True and session.beam_level == 1.5
     session.set_beam(False, 0.5)                                               # and the app can set it too (Settings)
     assert (session.menu.beam_on, session.menu.beam_level) == (False, 0.5)
+
+
+# --- the timeline and skip buttons -------------------------------------------------------------------------------
+
+
+def timeline_menu(position_ms=0, duration_ms=5_800_000, **kw) -> Menu:
+    menu = Menu()
+    menu.sync(playing=True, title="Up", has_media=True, has_lights=True, seat_label="Row 2", has_seats=True,
+              position_ms=position_ms, duration_ms=duration_ms, **kw)
+    menu.show("main")
+    return menu
+
+
+def test_the_main_page_has_a_timeline_and_skip_buttons_for_a_film_with_a_length():
+    menu = timeline_menu(position_ms=754_000)
+    menu.image()
+    ids = [b.id for b in menu._buttons]
+    assert {"seek", "skip:-60", "skip:-10", "skip:10", "skip:60"} <= set(ids)
+    assert menumod.clock_text(754) == "12:34" and menumod.clock_text(5797) == "1:36:37"
+    assert click(menu, "skip:-60") == ("skip", -60_000) and click(menu, "skip:10") == ("skip", 10_000)
+    assert "seek" not in [b.id for b in ready()._buttons if ready().image()]      # no length known: no timeline
+
+
+def test_pointing_at_the_timeline_jumps_to_that_fraction_of_the_film():
+    menu = timeline_menu()
+    left, width = menumod.BAR
+    u_half = (left + width * 0.5) / menumod.W
+    action = menu.press("seek", u_half)
+    assert action[0] == "seek" and action[1] == pytest.approx(0.5, abs=1e-6)
+    assert menu.press("seek", 0.0)[1] == 0.0 and menu.press("seek", 1.0)[1] == 1.0     # off either end: clamped
+    assert menu.press("seek") is None                                                    # no pointer position, no jump
+
+
+def test_the_timeline_follows_the_film_once_a_second_and_every_row_still_fits_above_the_bottom_buttons():
+    menu = timeline_menu(position_ms=1000)
+    menu.image()
+    version = menu.version
+    menu.sync(playing=True, title="Up", has_media=True, has_lights=True, seat_label="Row 2", has_seats=True,
+              position_ms=1400, duration_ms=5_800_000)
+    menu.image()
+    assert menu.version == version                          # same second: not redrawn
+    menu.sync(playing=True, title="Up", has_media=True, has_lights=True, seat_label="Row 2", has_seats=True,
+              position_ms=2100, duration_ms=5_800_000)
+    menu.image()
+    assert menu.version == version + 1
+    menu.set_beam(has=True)
+    menu.set_audio("Automatic: Oculus Virtual Audio Device")
+    menu.image()
+    rows = [b.rect for b in menu._buttons if b.id not in ("recentre", "screenshot", "exit", "close", "play", "page:videos", "page:help")]
+    assert max(r.bottom() for r in rows) <= 668 - 4 and min(r.top() for r in rows) >= 140 + 100       # clear of the buttons above and below
+    overlaps = [(a.id, b.id) for i, a in enumerate(menu._buttons) for b in menu._buttons[i + 1:] if a.rect.intersects(b.rect)]
+    assert not overlaps
+
+
+def test_skip_and_seek_actions_reach_the_player(qapp):
+    from ultimate_video_3d.vr.controller import VRController
+
+    class Media:
+        is_open, duration_ms = True, 6_000_000
+
+        def __init__(self):
+            self.calls = []
+
+        def seek_relative(self, ms):
+            self.calls.append(("relative", ms))
+
+        def seek_ms(self, ms):
+            self.calls.append(("seek", ms))
+
+    controller = VRController(session_factory=lambda *a: None, media_factory=lambda *a: None)
+    controller.media = Media()
+    controller._on_menu_action(("skip", -10_000))
+    controller._on_menu_action(("seek", 0.25))
+    assert controller.media.calls == [("relative", -10_000), ("seek", 1_500_000)]

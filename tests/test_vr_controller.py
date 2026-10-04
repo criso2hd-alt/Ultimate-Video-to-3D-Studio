@@ -564,3 +564,112 @@ def test_the_vr_diary_records_what_happened(vr, tmp_path, monkeypatch):
     vr.stop()
     text = (tmp_path / "vr.log").read_text(encoding="utf8")
     assert "Start VR pressed" in text and "starting a session" in text and "stop requested" in text
+
+
+def test_a_half_made_context_is_freed_piece_by_piece_even_when_pyopenxrs_own_exit_fails(monkeypatch):
+    """pyopenxr's exit dies on the first line if the start-up stopped early, leaving the instance alive (LimitReachedError later)."""
+    import types
+
+    from ultimate_video_3d.vr import session as sessionmod
+
+    destroyed = []
+    fake_xr = types.SimpleNamespace(
+        destroy_instance=lambda h: destroyed.append(("instance", h)), destroy_session=lambda h: destroyed.append(("session", h)),
+        destroy_space=lambda h: destroyed.append(("space", h)), destroy_action_set=lambda h: destroyed.append(("actions", h)))
+    monkeypatch.setitem(sys.modules, "xr", fake_xr)
+
+    class Graphics:
+        def destroy(self):
+            destroyed.append(("graphics", None))
+
+    class Half:
+        instance, session, graphics = "I", "S", Graphics()                   # no ``space`` / ``default_action_set``: never made
+
+        def __exit__(self, *args):
+            raise AttributeError("default_action_set")
+
+    half = Half()
+    sessionmod.release_context(half)
+    assert [name for name, _ in destroyed] == ["session", "graphics", "instance"]
+    assert half.instance is None and half.session is None
+
+
+def test_a_start_that_the_runtime_refuses_for_now_is_tried_again_with_a_fresh_context(monkeypatch):
+    from ultimate_video_3d.vr import session as sessionmod
+
+    monkeypatch.setattr(sessionmod.time, "sleep", lambda _s: None)
+    made = []
+
+    class Context:
+        def __init__(self):
+            self.n = len(made)
+            made.append(self)
+            self.exited = 0
+
+        def __enter__(self):
+            if self.n < 2:
+                raise RuntimeError("LimitReachedError: the runtime supports no more of the requested resource")
+            return self
+
+        def __exit__(self, *args):
+            self.exited += 1
+
+    with sessionmod.GuardedContext(Context, attempts=4) as ctx:
+        assert ctx is made[2] and len(made) == 3                            # two refusals, the third try got in
+    assert made[0].exited == 1 and made[1].exited == 1
+
+    made.clear()
+    with pytest.raises(RuntimeError):
+        with sessionmod.GuardedContext(Context, attempts=2):                  # not enough tries
+            pass
+
+    class Broken(Context):
+        def __enter__(self):
+            raise ValueError("something else")
+
+    tries = []
+    with pytest.raises(ValueError):
+        with sessionmod.GuardedContext(lambda: tries.append(1) or Broken(), attempts=4):
+            pass
+    assert len(tries) == 1                                                   # an error that is not "busy" is not retried
+
+
+def test_every_headset_session_gets_its_own_session_create_info():
+    """The shared default argument was filled in by the first session, which broke every later one in the same process."""
+    import inspect
+
+    from ultimate_video_3d.vr import session as sessionmod
+
+    source = inspect.getsource(sessionmod.VRSession._run)
+    assert "session_create_info=xr.SessionCreateInfo()" in source
+
+
+def test_the_sound_steers_the_picture_clock_gently_and_a_stalled_sound_is_restarted(qapp, monkeypatch):
+    from ultimate_video_3d.vr import media as mediamod
+
+    class Audio:
+        def __init__(self):
+            self.calls = []
+
+        def setPosition(self, ms):
+            self.calls.append(("position", ms))
+
+        def play(self):
+            self.calls.append("play")
+
+    media = mediamod.VRMedia.__new__(mediamod.VRMedia)                  # only the clock logic: no Qt player, no file
+    from ultimate_video_3d.player import Clock
+
+    media._clock, media._audio, media._playing, media._has_audio = Clock(), Audio(), True, True
+    media._audio_last_ms, media._audio_seen, media._feeder = -1, mediamod.time.monotonic(), object()
+    media._clock.start(10_000.0)
+    now = media._clock.now()
+    media._audio_position(int(now) + 10)                                # inside the sound buffer's own latency: left alone
+    assert abs(media._clock.now() - now) < 15
+    media._audio_position(int(media._clock.now()) + 100)                # a real but small difference: a tenth of it, not a jump
+    assert 5 < media._clock.now() - now < 40
+    media._audio_position(40_000)                                       # a seek or real drift: follow at once
+    assert media._clock.now() > 39_900
+    media._audio_seen -= 5                                              # the sound's position has not moved for 5 s
+    media._check_audio()
+    assert media._audio.calls and media._audio.calls[-1] == "play"      # restarted where the picture is

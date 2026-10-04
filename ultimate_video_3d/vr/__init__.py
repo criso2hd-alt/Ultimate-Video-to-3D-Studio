@@ -10,6 +10,16 @@ from __future__ import annotations
 import sys
 import threading
 
+# PyOpenGL checks for an error after every single call by default, which more than doubled the time the renderer spent per frame
+# (measured: 7.7 ms -> 3.9 ms for both eyes of the home theatre with the lights down). Must be set before anything imports OpenGL.
+try:
+    import OpenGL
+
+    OpenGL.ERROR_CHECKING = False
+    OpenGL.ERROR_LOGGING = False
+except Exception:  # noqa: BLE001 - no PyOpenGL: VR is unavailable anyway
+    pass
+
 #: Held while an OpenXR instance is being created and turned into a session, and by every headset probe. The Meta runtime keeps
 #: some of its state for the whole process: a probe that created and destroyed its own instance in the middle of a start-up made
 #: it forget that the graphics requirements had been asked for (GraphicsRequirementsCallMissingError), and a half-finished start-up

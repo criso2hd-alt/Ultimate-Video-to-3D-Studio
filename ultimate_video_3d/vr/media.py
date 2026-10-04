@@ -10,14 +10,25 @@ the GPU, rather than a small picture for a window. This object lives on the UI t
 from __future__ import annotations
 
 import threading
+import time
 from pathlib import Path
 
 import numpy as np
-from PySide6.QtCore import QObject, QUrl, Signal
+from PySide6.QtCore import QObject, QTimer, QUrl, Signal
 
 from .. import bars, hdr, video
 from ..player import Clock, FrameFeeder
 from . import geometry as geo
+from .log import log as vrlog
+
+#: The picture runs on the system clock and the sound only steers it. Qt's audio position was used directly before, and when the
+#: headset's sound device hiccuped (it reports the same position over and over, or jumps) the picture followed it: judder that no
+#: pause or seek cured. Now small differences are slewed away gently, a big one (a seek, real drift) is followed at once, and a sound
+#: that has stopped moving is restarted without the picture noticing.
+RESYNC_MS = 300.0        # further than this from the sound: jump to it
+SLEW = 0.1               # otherwise move this share of the difference per report (about 10 reports a second)
+SLEW_BELOW_MS = 25.0     # and ignore differences this small (they are the sound buffer's own latency)
+STALL_SECONDS = 2.0      # sound that has not moved for this long while playing is restarted
 
 #: Largest frame handed to the GPU. A headset eye shows well under 4K of a screen, so more is wasted work.
 CAPS = {"sbs": (3840, 2160), "tb": (3840, 2160), "flat": (3840, 2160)}
@@ -80,6 +91,11 @@ class VRMedia(QObject):
         self._detected = bars.NONE                      # what the scan of the open file found (None until it finishes)
         self._scan_token = 0
         self._bar_cache: dict[tuple, bars.Crop] = {}
+        self._audio_seen = 0.0                          # the last time the sound's position moved, and where it was
+        self._audio_last_ms = -1
+        self._stall_timer = QTimer(self)
+        self._stall_timer.setInterval(1000)
+        self._stall_timer.timeout.connect(self._check_audio)
 
     # -- facts about what is open ------------------------------------------------------------------
 
@@ -164,6 +180,7 @@ class VRMedia(QObject):
             feeder.shutdown()
         self._audio.stop()
         self._audio.setSource(QUrl())
+        self._stall_timer.stop()
         self._playing = False
         with self._lock:
             self._latest, self._taken = None, True
@@ -197,6 +214,8 @@ class VRMedia(QObject):
         if self._has_audio:
             self._audio.setPosition(int(self._clock.now()))
             self._audio.play()
+            self._audio_seen, self._audio_last_ms = time.monotonic(), -1
+            self._stall_timer.start()
         self._feeder.play()
         self.state_changed.emit(True)
 
@@ -204,6 +223,7 @@ class VRMedia(QObject):
         if self._feeder is None or not self._playing:
             return
         self._playing = False
+        self._stall_timer.stop()
         self._feeder.pause()
         self._audio.pause()
         self._clock.stop()
@@ -244,6 +264,34 @@ class VRMedia(QObject):
         if not self.loop and self._playing and self.duration_ms and ms >= self.duration_ms - 120:
             self.ended.emit()
 
+    def stats_text(self) -> str:
+        """How the picture side is doing, for the diary: frames shown, dropped for being late, average lateness of the shown ones."""
+        feeder = self._feeder
+        if feeder is None:
+            return "no film"
+        s = feeder.stats
+        shown = max(1, s["shown"])
+        return f"shown {s['shown']}, dropped {s['dropped']}, on average {s['behind_ms'] / shown:.0f} ms behind"
+
     def _audio_position(self, ms: int) -> None:
-        if self._has_audio and self._playing:
+        if not (self._has_audio and self._playing):
+            return
+        if ms != self._audio_last_ms:
+            self._audio_last_ms, self._audio_seen = ms, time.monotonic()
+        drift = ms - self._clock.now()                  # positive: the sound is ahead of the picture clock
+        if abs(drift) > RESYNC_MS:
             self._clock.set(ms)
+        elif abs(drift) > SLEW_BELOW_MS:
+            self._clock.nudge(drift * SLEW)
+
+    def _check_audio(self) -> None:
+        """Playing, but the sound's position has not moved: the device stalled (a headset that slept, a driver reset). Restart the
+        sound where the picture is; the picture keeps running on its own clock meanwhile."""
+        if not (self._playing and self._has_audio) or self._feeder is None:
+            return
+        if time.monotonic() - self._audio_seen < STALL_SECONDS:
+            return
+        vrlog(f"the sound stopped moving at {self._audio_last_ms} ms; restarting it")
+        self._audio_seen = time.monotonic()
+        self._audio.setPosition(int(self._clock.now()))
+        self._audio.play()

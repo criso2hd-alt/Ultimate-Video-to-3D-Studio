@@ -344,7 +344,7 @@ how `scripts/blender/bake_room.py` handles it now:
 - A bake stops at once if a visible mesh is in no group or a listed name is missing (`--allow-unbaked` overrides); `ProjectorLensGlow` is hidden in
   every bake (the app will draw the beam and lens glow live).
 **Getting into VR without the mouse, and sound (2026-10-03).** `VRController.watch(True)` (switched on by `MainWindow._update_vr_watch`
-while the Library tab is open and `settings.vr_auto_connect`) polls `vr.headset_present()` (an OpenXR instance + one system query, off
+while the Library tab is open and `settings.vr_watch`) polls `vr.headset_present()` (an OpenXR instance + one system query, off
 the UI thread, every 5 s) and starts the session by itself when a headset appears; a session that finds none while watching is silent
 (not the "Please connect your headset" box). Leaving VR from the menu (`stop()`) pauses watching until VR is asked for again. The
 Library's Play in VR button is enabled with nothing selected (`vr_requested(None)`: the app starts the session and the headset's first
@@ -452,13 +452,32 @@ NV12 download + conversion cost more than that, so it only pays for 4K HEVC; wor
 decode and render on the CPU, depth on the GPU, painted with QPainter (a QOpenGLWidget would move the last step to the GPU).
 **Starting VR is a button now, not a guess.** The Library has a Start VR / Stop VR button with a status line beside it
 (`LibraryPage.set_vr_state`, fed by `VRController.state_changed`: off, starting, waiting, worn, stopping). Automatic headset watching is
-OFF by default (`vr_auto_connect`, Settings: "Also look for my headset by itself..."). `VRController.start_vr()` clears an earlier failure and
+OFF by default (`vr_watch`, Settings: "Also look for my headset by itself..."). `VRController.start_vr()` clears an earlier failure and
 starts; the runtime has `START_TIMEOUT` (40 s) to accept the session (`VRSession.connected`, emitted when the instance/session/GL context exist) -
 after that the person is told - while waiting for the *headset* never times out. `stop()` no longer blocks the window: state "stopping", polled
 every 150 ms, and a session that has not ended after `STOP_PATIENCE` (12 s) is let go of (`_abandon_session`) so a fresh one can be made;
 `stop(blocking=True)` is for quitting. Everything is written to `vr.log` in the data folder (`vr/log.py`: requests, runtime connect, session
 states, errors with tracebacks, watchdog) - read it first when VR "sticks". LimitReached / GraphicsRequirementsCallMissing / RuntimeFailure
 now say "close other VR apps, check Quest Link, press Start VR again".
+
+**VR start-up, really fixed (2026-10-04, from `vr.log`).** The first session in a process worked; every later one failed with
+GraphicsRequirementsCallMissingError and then LimitReachedError until the runtime reclaimed the leaked instance. Two bugs in how we used
+pyopenxr, both visible in the log: (1) `ContextObject.__init__(session_create_info=xr.SessionCreateInfo())` is ONE shared default object; the
+first session fills in `.next` with its graphics binding, so every later session skips creating its graphics, never asks for the graphics
+requirements, and fails - `VRSession._run` now passes a new `SessionCreateInfo()` per try; (2) pyopenxr's `__exit__` begins with
+`self.default_action_set` / `self.space`, which a half-finished start-up never made, so it died on its first line and left the instance
+alive (LimitReached) - `session.release_context` frees each piece on its own. `GuardedContext(factory, attempts=4)` also retries a refusal
+of those two kinds after 2.5 s with a fresh context. `vr.log` (beside the exe, `vr/log.py`) is what found all this: read it first.
+The old "look for my headset" setting is now `vr_watch` (the key changed so a saved True from the unreliable builds is dropped; default off).
+**In the headset (2026-10-04).** The main menu has a timeline (click to jump) with -1 min / -10 s / +10 s / +1 min buttons
+(`Menu._timeline`, actions `("skip", ms)` / `("seek", fraction)` carried out by `VRController`); the left stick still steps 10 s. The
+picture clock no longer copies Qt's audio position (a headset sound device that stalled or jumped dragged the picture with it - judder no pause
+cured): `VRMedia._audio_position` only slews small differences, jumps for big ones, and `_check_audio` restarts a sound that stopped moving.
+PyOpenGL's per-call error check is off (`vr/__init__.py`): both eyes of the home theatre took 7.7 ms and now 3.9 ms (GPU is not the limit: an
+RTX 4080 draws the room with the lights down and the beam on in 3.9 ms; the rest is Python overhead and GIL pressure). The diary logs fps and
+the feeder's dropped/late frames every 30 s while a film plays. `app._exit_watchdog` ends the process 8 s after the window closes if Python is
+still waiting on a thread - a lingering process kept the VR runtime busy and blocked the next start. Idea from the owner, not built: show the
+whole app window (the Library) on a panel in the headset, driven by the controllers' pointer (render the Qt widget to an image, send mouse events).
 
 ## Planned for 0.2: macOS
 

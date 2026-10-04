@@ -213,30 +213,87 @@ from . import NO_HEADSET, XR_LOCK  # noqa: E402  (shared with the controller, wh
 from .log import log as vrlog, log_error  # noqa: E402
 
 
+#: Errors a start-up can answer with that are worth another go a moment later (the runtime still finishing with the last session).
+_TRANSIENT = ("limitreached", "graphicsrequirementscallmissing")
+
+
+def release_context(context, call_exit: bool = True) -> None:
+    """Free everything a (possibly half-finished) pyopenxr ContextObject made.
+
+    pyopenxr's own ``__exit__`` starts by touching ``default_action_set`` and ``space``, which do not exist if the start-up
+    stopped before creating them; it dies on the first line and the instance (and session) stay alive. The Meta runtime then
+    answers every later start with LimitReachedError. So its exit is tried, and then each piece is freed here on its own,
+    ignoring the ones that were never made.
+    """
+    if call_exit:
+        try:
+            context.__exit__(None, None, None)
+        except Exception:  # noqa: BLE001 - expected for a half-made context: the pieces are freed one by one below
+            pass
+    try:
+        import xr
+    except Exception:  # noqa: BLE001
+        return
+    for name, destroy in (("default_action_set", "destroy_action_set"), ("space", "destroy_space"), ("session", "destroy_session")):
+        handle = getattr(context, name, None)
+        if handle is not None:
+            try:
+                getattr(xr, destroy)(handle)
+            except Exception:  # noqa: BLE001
+                pass
+            setattr(context, name, None)
+    graphics = getattr(context, "graphics", None)
+    if graphics is not None:
+        try:
+            graphics.destroy()
+        except Exception:  # noqa: BLE001
+            pass
+        context.graphics = None
+    instance = getattr(context, "instance", None)
+    if instance is not None:
+        try:
+            xr.destroy_instance(instance)
+        except Exception:  # noqa: BLE001
+            pass
+        context.instance = None
+
+
 class GuardedContext:
-    """pyopenxr's ContextObject, started under ``XR_LOCK`` and cleaned up if the start-up fails half way.
+    """pyopenxr's ContextObject, started under ``XR_LOCK``, cleaned up if the start-up fails half way, and tried again when the
+    runtime says it is still busy.
 
     Without the lock a headset probe can create and destroy another OpenXR instance in the middle of this one's start-up;
     without the clean-up a start-up that stops half way leaves its instance behind, and the runtime then refuses every later
-    try (LimitReachedError) until the app is restarted. The lock is let go as soon as the session exists.
+    try (LimitReachedError) until the app is restarted (see :func:`release_context`). The lock is let go as soon as the session
+    exists. Give a *factory* (not an object) to allow ``attempts`` tries: every try needs a brand-new context.
     """
 
-    def __init__(self, context) -> None:
-        self._context = context
+    def __init__(self, context, attempts: int = 1, wait: float = 2.5, stop=None) -> None:
+        self._factory = (lambda: context) if hasattr(type(context), "__enter__") else context      # an object, or a factory for new ones
+        self._context = None
+        self._attempts, self._wait, self._stop = max(1, attempts), wait, stop
 
     def __enter__(self):
-        with XR_LOCK:
-            try:
-                return self._context.__enter__()
-            except BaseException:
+        for attempt in range(1, self._attempts + 1):
+            context = self._context = self._factory()
+            with XR_LOCK:
                 try:
-                    self._context.__exit__(None, None, None)         # free whatever the failed start-up had made
-                except Exception:  # noqa: BLE001 - best effort
-                    pass
-                raise
+                    return context.__enter__()
+                except BaseException as error:
+                    release_context(context)                           # free whatever the failed start-up had made
+                    text = f"{type(error).__name__} {error}".lower().replace("_", "")
+                    retry = (attempt < self._attempts and any(t in text for t in _TRANSIENT)
+                             and not (self._stop is not None and self._stop.is_set()))
+                    if not retry:
+                        raise
+                    vrlog(f"start-up try {attempt} failed ({type(error).__name__}); trying again in {self._wait:.1f} s")
+            time.sleep(self._wait)                                    # outside the lock: the probe and others may go meanwhile
 
     def __exit__(self, exc_type, exc_value, traceback):
-        return self._context.__exit__(exc_type, exc_value, traceback)
+        try:
+            return self._context.__exit__(exc_type, exc_value, traceback)
+        finally:
+            release_context(self._context, call_exit=False)         # whatever its own exit missed
 
 
 def friendly_error(error: BaseException) -> str:
@@ -386,8 +443,14 @@ class VRSession(QObject):
         space = xr.ReferenceSpaceCreateInfo(reference_space_type=xr.ReferenceSpaceType.STAGE)
         _prefer_srgb_swapchain()
         vrlog("connecting to the OpenXR runtime")
-        with GuardedContext(ContextObject(context_provider=GLFWOffscreenContextProvider(), instance_create_info=info,
-                                          reference_space_create_info=space)) as ctx:
+        # A new SessionCreateInfo for every try: pyopenxr's default argument is ONE shared object that the first session fills in
+        # with its graphics binding. Every later session in the same process then skips creating its graphics, never asks the
+        # runtime for the graphics requirements (GraphicsRequirementsCallMissingError) and leaks its instance (LimitReachedError).
+        def make_context():
+            return ContextObject(context_provider=GLFWOffscreenContextProvider(), instance_create_info=info,
+                                 session_create_info=xr.SessionCreateInfo(), reference_space_create_info=space)
+
+        with GuardedContext(make_context, attempts=4, stop=self._stop) as ctx:
             vrlog("connected: instance, session and graphics context exist")
             self.connected.emit()
             inputs = _Inputs(ctx)
@@ -396,6 +459,7 @@ class VRSession(QObject):
             last_state = None
             last_time = time.monotonic()
             frames, window = 0, time.monotonic()
+            last_stats = time.monotonic()
             exiting = False
             while True:
                 ctx.poll_xr_events()
@@ -439,6 +503,10 @@ class VRSession(QObject):
                 frames += 1
                 if now - window >= 1.0:
                     self.fps, frames, window = frames / (now - window), 0, now
+                if now - last_stats >= 30.0:
+                    last_stats = now
+                    if media.playing:
+                        vrlog(f"playing: the headset loop runs at {self.fps:.0f} fps; film {media.stats_text()}")
 
     # -- one frame --------------------------------------------------------------------------------
 
@@ -527,7 +595,8 @@ class VRSession(QObject):
         seat = self.room.seat(self.seat) if self.room is not None and self.seat else None
         menu.sync(playing=media.playing, title=media.path.stem if media.is_open and media.path else "",
                   has_media=media.is_open, has_lights=self.room is not None, seat_label=seat.label if seat else "",
-                  has_seats=self.room is not None and len(self.room.seats) > 1)
+                  has_seats=self.room is not None and len(self.room.seats) > 1,
+                  position_ms=media.position_ms if media.is_open else 0.0, duration_ms=media.duration_ms if media.is_open else 0.0)
         menu.tick(dt)
         if menu.open:
             image = menu.image()
@@ -623,7 +692,7 @@ class VRSession(QObject):
                     button = menu.hit(where[1], where[2])
                     hover = button or hover
                     if hand.select_pressed and button:
-                        presses.append(button)
+                        presses.append((button, where[1]))
             landed = bool(hit or on_menu)
             beams.append((origin, direction, length, BEAM_HIT if landed else BEAM_IDLE, landed))     # the last: draw a dot at the tip
             if hand.select_pressed and hit and not on_menu:
@@ -632,8 +701,8 @@ class VRSession(QObject):
                 self._drag(name, hand)
         if menu.open:
             menu.set_hover(hover)
-        for button in presses:
-            self._apply(menu.press(button))
+        for button, across in presses:
+            self._apply(menu.press(button, across))
         if any(h.menu_pressed or h.secondary_pressed for h in hands.values()):
             self._toggle_menu()
         if any(h.reset_pressed for h in hands.values()):

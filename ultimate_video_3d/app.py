@@ -5,6 +5,7 @@ from __future__ import annotations
 import copy
 import os
 import sys
+import threading
 import time
 from pathlib import Path
 
@@ -710,7 +711,7 @@ class SettingsPage(QWidget):
         self.vr_room_label.setObjectName("hint")
         self.vr_room_label.setWordWrap(True)
         self.vr_auto = QCheckBox("Also look for my headset by itself while the Library is open")
-        self.vr_auto.setChecked(settings.vr_auto_connect)
+        self.vr_auto.setChecked(settings.vr_watch)
         self.vr_auto.setToolTip("Off by default: use the Start VR button in the Library. With this on, the app looks for a headset every "
                                 "few seconds while the Library is open and connects to it by itself. That depends on the headset "
                                 "software behaving, so if starting VR ever fails or sticks, leave this off. "
@@ -2053,7 +2054,7 @@ class MainWindow(QMainWindow):
             pass
 
     def _vr_auto_changed(self, on: bool) -> None:
-        self.settings.vr_auto_connect = on
+        self.settings.vr_watch = on
         self.settings.save(paths.settings_path())
         self._update_vr_watch()
 
@@ -2087,7 +2088,7 @@ class MainWindow(QMainWindow):
 
     def _update_vr_watch(self) -> None:
         """Look for a headset while the Library is open (if the person wants that and VR can work here at all)."""
-        on = (self.settings.vr_auto_connect and self.tabs.currentWidget() is self.library_page
+        on = (self.settings.vr_watch and self.tabs.currentWidget() is self.library_page
               and self.library_page._vr_available)
         self.vr.watch(on)
 
@@ -2253,4 +2254,32 @@ def main() -> None:
     apply_app_theme(app, theme)
     window = MainWindow()
     window.show()
-    sys.exit(app.exec())
+    code = app.exec()
+    _exit_watchdog()
+    sys.exit(code)
+
+
+EXIT_GRACE_SECONDS = 8.0
+
+
+def _exit_watchdog(grace: float = EXIT_GRACE_SECONDS, kill=os._exit) -> threading.Thread:
+    """Make sure the process really ends once the window is closed.
+
+    Python waits at exit for every non-daemon thread (a thumbnail job, a decode that is mid-seek, a runtime call that never returns),
+    and a process that lingers keeps the VR runtime's session and the files it had open: the next start was refused until the
+    person killed it in the Task Manager. The timer is a daemon thread, so it keeps running through that wait; if the process is
+    still here after ``grace`` seconds it is ended.
+    """
+    def run() -> None:
+        time.sleep(grace)
+        try:
+            from .vr.log import log
+
+            log(f"the app was still running {grace:.0f} s after its window closed; ending it")
+        except Exception:  # noqa: BLE001
+            pass
+        kill(0)
+
+    thread = threading.Thread(target=run, name="uv3d-exit-watchdog", daemon=True)
+    thread.start()
+    return thread

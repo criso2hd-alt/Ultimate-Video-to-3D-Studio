@@ -87,7 +87,7 @@ class AppSettings:
     last_video_dir: str = ""
     last_lut_dir: str = ""
     vr_room_dir: str = ""                # a baked VR room folder; "" = the first one found, or the plain stand-in room
-    vr_auto_connect: bool = False        # on the Library tab, look for a headset and get ready for it by itself (off: the Start VR button does it)
+    vr_watch: bool = False        # on the Library tab, look for a headset and get ready for it by itself (off: the Start VR button does it)
     vr_audio_device: str = ""            # the sound device chosen in the headset's menu; "" = the headset's own, automatically
     vr_trim_bars: bool = True            # show a film's real picture on the VR screen, without the black bars burned into its frame
     vr_beam: bool = True                 # the projector's light beam through the room's air (the lens glows either way)
@@ -144,8 +144,8 @@ class AppSettings:
             settings.preview_fps = raw["preview_fps"]
         if isinstance(raw.get("check_updates"), bool):
             settings.check_updates = raw["check_updates"]
-        if isinstance(raw.get("vr_auto_connect"), bool):
-            settings.vr_auto_connect = raw["vr_auto_connect"]
+        if isinstance(raw.get("vr_watch"), bool):
+            settings.vr_watch = raw["vr_watch"]
         if isinstance(raw.get("vr_trim_bars"), bool):
             settings.vr_trim_bars = raw["vr_trim_bars"]
         if isinstance(raw.get("vr_beam"), bool):

@@ -222,12 +222,12 @@ def test_play_in_vr_with_nothing_selected_goes_in_and_leaves_the_choice_to_the_h
 
 def test_the_library_tab_gets_ready_for_the_headset_and_leaving_it_stops_looking(win, qapp):
     win.library_page.set_vr_available(True)
-    win.settings.vr_auto_connect = True
+    win.settings.vr_watch = True
     win.tabs.setCurrentWidget(win.library_page)
     assert ("watch", True) in win.vr.calls
     win.tabs.setCurrentWidget(win.video_page)
     assert win.vr.calls[-1] == ("watch", False)
-    win.settings.vr_auto_connect = False                                       # the person switched it off in Settings
+    win.settings.vr_watch = False                                       # the person switched it off in Settings
     win.vr.calls.clear()
     win.tabs.setCurrentWidget(win.library_page)
     assert ("watch", True) not in win.vr.calls and ("watch", False) in win.vr.calls
@@ -235,9 +235,9 @@ def test_the_library_tab_gets_ready_for_the_headset_and_leaving_it_stops_looking
 
 def test_the_settings_switch_for_getting_ready_is_saved(win):
     win.settings_page.vr_auto.setChecked(False)
-    assert win.settings.vr_auto_connect is False
+    assert win.settings.vr_watch is False
     win.settings_page.vr_auto.setChecked(True)
-    assert win.settings.vr_auto_connect is True
+    assert win.settings.vr_watch is True
 
 
 def test_the_projector_beam_switch_and_brightness_are_saved_and_sent_to_the_headset(win):
@@ -314,7 +314,7 @@ def test_the_start_vr_button_connects_without_choosing_a_video_and_stop_vr_leave
 
 
 def test_automatic_headset_watching_is_off_unless_the_person_turns_it_on(win):
-    assert win.settings.vr_auto_connect is False and not win.settings_page.vr_auto.isChecked()
+    assert win.settings.vr_watch is False and not win.settings_page.vr_auto.isChecked()
 
 
 def test_changing_the_format_replaces_the_last_runs_encoder_message_with_the_files_description(win):
@@ -338,3 +338,10 @@ def test_a_running_conversion_puts_its_times_on_the_picture_and_clears_them_afte
     assert any("H.265" in line for line in page.preview._stats)
     win._teardown()
     assert page.preview._stats is None
+
+
+def test_the_exit_watchdog_ends_a_process_that_would_otherwise_linger():
+    ended = []
+    thread = appmod._exit_watchdog(grace=0.05, kill=ended.append)
+    thread.join(2.0)
+    assert ended == [0] and thread.daemon                              # a daemon thread, so it also runs while Python waits for the others

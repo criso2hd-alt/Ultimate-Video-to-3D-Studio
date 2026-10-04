@@ -11,6 +11,7 @@ Pressing a button returns an *action* tuple for whoever owns the headset to carr
 about the menu itself (changing page, paging through videos):
     ("play",)  ("video", Tile)  ("lights", "auto"|"on"|"off")  ("volume", 0..1)  ("seat", +1|-1)  ("recentre",)
     ("exit",)  ("close",)  ("screenshot",)  ("audio", +1|-1)  ("beam", on, level)  ("room", Tile)
+    ("skip", milliseconds, back or forward)  ("seek", 0..1 of the film's length)
 """
 
 from __future__ import annotations
@@ -25,6 +26,16 @@ ASPECT = W / H
 PER_PAGE = 6
 LIGHT_MODES = (("auto", "Auto"), ("on", "On"), ("off", "Off"))
 HELP_SECONDS = 16.0                        # the first-time card goes away by itself after this
+SKIPS = (("skip:-60", "-1 min"), ("skip:-10", "-10 s"))      # the buttons left of the timeline ...
+SKIPS_AFTER = (("skip:10", "+10 s"), ("skip:60", "+1 min"))  # ... and right of it
+BAR = (282.0, 716.0)                       # the timeline's left edge and width on the main page (the panel is W px wide)
+
+
+def clock_text(seconds: float) -> str:
+    """12:34, or 1:36:37 for a film an hour or more long."""
+    seconds = max(0, int(seconds))
+    hours, rest = divmod(seconds, 3600)
+    return f"{hours}:{rest // 60:02d}:{rest % 60:02d}" if hours else f"{rest // 60}:{rest % 60:02d}"
 
 INK, DIM, FAINT = QColor("#f5f9ff"), QColor("#9bacc2"), QColor("#61748d")
 PANEL, LINE = QColor(13, 22, 37, 238), QColor("#29405d")
@@ -68,6 +79,8 @@ class Menu:
         self.title = ""
         self.has_media = False
         self.has_lights = False
+        self.position_s = 0                 # where the film is and how long it is, in whole seconds (the panel is redrawn once a second, not every frame)
+        self.duration_s = 0
         self.seat_label = ""
         self.has_seats = False
         self.lights = "auto"
@@ -129,11 +142,17 @@ class Menu:
             if self.help_left <= 0:
                 self.close()
 
-    def sync(self, *, playing: bool, title: str, has_media: bool, has_lights: bool, seat_label: str, has_seats: bool) -> None:
-        values = (playing, title, has_media, has_lights, seat_label, has_seats)
-        if values != (self.playing, self.title, self.has_media, self.has_lights, self.seat_label, self.has_seats):
-            (self.playing, self.title, self.has_media, self.has_lights, self.seat_label, self.has_seats) = values
+    def sync(self, *, playing: bool, title: str, has_media: bool, has_lights: bool, seat_label: str, has_seats: bool,
+             position_ms: float = 0.0, duration_ms: float = 0.0) -> None:
+        position_s, duration_s = int(max(0.0, position_ms) // 1000), int(max(0.0, duration_ms) // 1000)
+        values = (playing, title, has_media, has_lights, seat_label, has_seats, duration_s)
+        if values != (self.playing, self.title, self.has_media, self.has_lights, self.seat_label, self.has_seats, self.duration_s):
+            (self.playing, self.title, self.has_media, self.has_lights, self.seat_label, self.has_seats, self.duration_s) = values
             self._dirty = True
+        if position_s != self.position_s:
+            self.position_s = position_s
+            if self.open and self.page == "main":
+                self._dirty = True                              # the timeline moves; other pages do not show it
 
     def set_rooms(self, rooms: list[Tile], current: str | None = None) -> None:
         self.rooms = list(rooms)
@@ -172,10 +191,17 @@ class Menu:
 
     # -- pressing ------------------------------------------------------------------------------------
 
-    def press(self, button: str | None) -> tuple | None:
-        """Carry out a press of ``button``; returns an action for the headset's owner, or None."""
+    def press(self, button: str | None, u: float | None = None) -> tuple | None:
+        """Carry out a press of ``button`` (``u``: where along the panel it was, 0..1, for the timeline); returns an action
+        for the headset's owner, or None."""
         if button is None or not self.open:
             return None
+        if button.startswith("skip:"):
+            return ("skip", int(button[5:]) * 1000)
+        if button == "seek":
+            if u is None or self.duration_s <= 0:
+                return None
+            return ("seek", min(1.0, max(0.0, (u * W - BAR[0]) / BAR[1])))
         if button.startswith("page:"):
             self.show(button[5:])
             return None
@@ -301,7 +327,10 @@ class Menu:
         for i, (button, label) in enumerate(names):
             self._button(p, button, QRectF(48 + i * (width + 22), top, width, 100), label,
                          style="primary" if button == "play" else "normal", pixels=44)
-        y, pitch, height = 252, 74, 62
+        y, pitch, height = 246, 64, 54
+        if self.has_media and self.duration_s > 0:
+            self._timeline(p, y, height)
+            y += pitch
         if self.has_lights:
             self._text(p, QRectF(48, y, 200, height), "Lights", 34, INK, bold=True)
             for i, (mode, label) in enumerate(LIGHT_MODES):
@@ -336,10 +365,31 @@ class Menu:
             self._button(p, "beam:+", QRectF(710, y, 90, height), "+", pixels=42)
             self._text(p, QRectF(830, y, 400, height), "The projector's light in the air. The lens always glows.", 20, FAINT, wrap=True)
         if self.note:
-            self._text(p, QRectF(48, 612, W - 96, 40), self.note, 24, SIGNAL)
+            self._text(p, QRectF(48, 626, W - 96, 36), self.note, 24, SIGNAL)
         self._button(p, "recentre", QRectF(48, 668, 380, 80), "Reset view", pixels=30)
         self._button(p, "screenshot", QRectF(450, 668, 380, 80), "Screenshot", pixels=30)
         self._button(p, "exit", QRectF(852, 668, 380, 80), "Leave VR", style="danger", pixels=30)
+
+    def _timeline(self, p: QPainter, y: float, height: float) -> None:
+        """Skip back / forward buttons around a bar showing where the film is; pointing at the bar and pulling the trigger jumps there."""
+        for i, (button, label) in enumerate(SKIPS):
+            self._button(p, button, QRectF(48 + i * 114, y, 104, height), label, pixels=26)
+        for i, (button, label) in enumerate(SKIPS_AFTER):
+            self._button(p, button, QRectF(1008 + i * 114, y, 104 if i == 0 else 110, height), label, pixels=26)
+        left, width = BAR
+        bar = QRectF(left, y, width, height)
+        self._buttons.append(_Button("seek", bar))
+        hot = self.hover == "seek"
+        p.setPen(QPen(SIGNAL if hot else LINE, 4 if hot else 2))
+        p.setBrush(RAISED_HOT if hot else RAISED)
+        p.drawRoundedRect(bar, 22, 22)
+        fraction = min(1.0, self.position_s / self.duration_s) if self.duration_s else 0.0
+        if fraction > 0:
+            p.setPen(Qt.PenStyle.NoPen)
+            p.setBrush(SIGNAL.darker(150))
+            p.drawRoundedRect(QRectF(left + 3, y + 3, max(16.0, (width - 6) * fraction), height - 6), 19, 19)
+        self._text(p, bar, f"{clock_text(self.position_s)} / {clock_text(self.duration_s)}", 28, INK, bold=True,
+                   align=Qt.AlignmentFlag.AlignCenter)
 
     def _videos_page(self, p: QPainter) -> None:
         self._header(p, "Your videos", f"Page {self.video_page + 1} of {self.page_count}", back=True)
@@ -405,7 +455,7 @@ class Menu:
         rows = (
             ("Trigger on the screen,  or  A / X", "Play and pause"),
             ("Left menu button,  or  B / Y", "Open this menu: videos, lights, seat, volume, beam"),
-            ("Left stick, left or right", "Back or forward 10 seconds"),
+            ("Left stick, left or right", "Back or forward 10 seconds (the menu has a timeline too)"),
             ("Right stick, any direction", "Go to the seat that way"),
             ("Press the right stick down", "Reset the view: face the screen"),
         )

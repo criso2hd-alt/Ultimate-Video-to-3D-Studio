@@ -73,6 +73,11 @@ class Clock:
         with self._lock:
             self._base_ms, self._base_t = float(ms), time.monotonic()
 
+    def nudge(self, delta_ms: float) -> None:
+        """Move the clock by ``delta_ms`` without restarting it (a gentle correction towards the sound)."""
+        with self._lock:
+            self._base_ms += float(delta_ms)
+
     def _now_locked(self) -> float:
         if not self._running:
             return self._base_ms
