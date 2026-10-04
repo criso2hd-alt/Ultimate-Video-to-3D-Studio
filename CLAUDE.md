@@ -398,6 +398,8 @@ that starts by itself (headset appeared) used to open in the plain built-in room
 `VRController.room_provider` (the app's `_vr_room_dir`) now loads it in `start()`. Rooms page: `vr/rooms.py` lists the folders under data/rooms with a
 room.glb (name from room.json, picture from `thumbnail.jpg|png` / `preview.jpg|png` in the room folder), the menu shows a Rooms button
 (only with more than one room) and a 3x2 Rooms page, a pick calls `use_room` live (seat and film stay) and `room_chosen` saves it as `vr_room_dir`.
+The plain built-in room (mirror floor, no baked room) is always the last card (`rooms.PLAIN`, `plain_thumbnail()` paints its picture); choosing it stores `vr_room_dir = "plain"`
+(Settings > "Use the plain room" does the same; an empty setting means "the first baked room"). The home theatre ships as the cinema-screen version only.
 **Home theatre screen is now cinematic (room v4).** `scripts/blender/set_screen_size.py` makes a copy of the .blend with only the Screen quad resized
 (6.6 x 2.76 m, 2.39:1, same bottom edge) and `bake_room.py --phase export` re-exports into a copy of the bake folder: nothing is re-baked and every
 other piece (groups, glow planes, seats, lens) is identical to v3 (checked). The owner's own .blend files are untouched; their working file still has

@@ -22,6 +22,7 @@ from pathlib import Path
 from PySide6.QtCore import QObject, QTimer, Signal
 
 from . import NO_HEADSET, headset_present
+from .rooms import PLAIN
 from . import available as vr_available
 from . import room as roommod
 
@@ -121,7 +122,7 @@ class VRController(QObject):
         self.session.menu_action.connect(self._on_menu_action)
         self.session.set_videos(self._tiles)
         if hasattr(self.session, "set_rooms"):
-            self.session.set_rooms(self._room_tiles, str(self._room_folder or ""))
+            self.session.set_rooms(self._room_tiles, self.room_key())
         if hasattr(self.media, "set_volume"):
             self.media.set_volume(self._volume)
         if hasattr(self.media, "failed"):
@@ -146,14 +147,18 @@ class VRController(QObject):
             self.session.set_room(self.room)
             self.seats_changed.emit(self.session.seat_names())
             if hasattr(self.session, "set_current_room"):
-                self.session.set_current_room(str(self._room_folder or ""))
+                self.session.set_current_room(self.room_key())
         return True
+
+    def room_key(self) -> str:
+        """Which room the person is in, as the Rooms page names it: its folder, or ``rooms.PLAIN`` for the plain built-in room."""
+        return str(self._room_folder) if self._room_folder else PLAIN
 
     def set_rooms(self, tiles: list) -> None:
         """The rooms to offer on the headset's Rooms page (Tile list; UI thread)."""
         self._room_tiles = list(tiles)
         if self.session is not None and hasattr(self.session, "set_rooms"):
-            self.session.set_rooms(self._room_tiles, str(self._room_folder or ""))
+            self.session.set_rooms(self._room_tiles, self.room_key())
 
     def start(self) -> bool:
         """Start the headset session (once). False, with a notice, if VR is not available on this computer."""
@@ -236,7 +241,7 @@ class VRController(QObject):
                 self.media.set_volume(self._volume)
         elif kind == "room":
             tile = action[1]
-            if self.use_room(Path(tile.path)):
+            if self.use_room(None if tile.path == PLAIN else Path(tile.path)):
                 self.room_chosen.emit(str(tile.path))
         elif kind == "audio":
             self.cycle_audio(int(action[1]))

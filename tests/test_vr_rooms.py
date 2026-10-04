@@ -108,3 +108,9 @@ def test_the_page_paints_with_and_without_pictures_and_marks_the_current_room(qa
         assert image.width() == menumod.W and not image.isNull()
     menu.set_current_room("C:/rooms/r3")
     assert menu.current_room == "C:/rooms/r3"
+
+
+def test_the_plain_room_has_a_picture_of_its_own(qapp):
+    picture = roomsmod.plain_thumbnail()
+    assert (picture.width(), picture.height()) == (640, 360) and not picture.isNull()
+    assert picture.pixelColor(320, 180).lightness() > picture.pixelColor(10, 350).lightness()        # the screen is brighter than the dark floor

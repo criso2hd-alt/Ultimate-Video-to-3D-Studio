@@ -1901,6 +1901,10 @@ class MainWindow(QMainWindow):
 
     def _vr_room_dir(self) -> Path | None:
         """The room to sit in: the one chosen in Settings, else the first folder with a room.glb in the data folder."""
+        from .vr.rooms import PLAIN
+
+        if self.settings.vr_room_dir == PLAIN:               # the plain built-in room was chosen: no baked room at all
+            return None
         chosen = Path(self.settings.vr_room_dir) if self.settings.vr_room_dir else None
         if chosen is not None and (chosen / "room.glb").is_file():
             return chosen
@@ -1931,7 +1935,9 @@ class MainWindow(QMainWindow):
         self._refresh_vr_settings()
 
     def _clear_vr_room(self) -> None:
-        self.settings.vr_room_dir = ""
+        from .vr.rooms import PLAIN
+
+        self.settings.vr_room_dir = PLAIN
         self._refresh_vr_settings()
 
     def _vr_failed(self, message: str) -> None:
@@ -1969,6 +1975,7 @@ class MainWindow(QMainWindow):
         for entry in roomsmod.find_rooms(paths.data_dir() / "rooms"):
             picture = QImage(str(entry.thumbnail)) if entry.thumbnail is not None else None
             tiles.append(Tile(entry.name, str(entry.folder), "", "", picture))
+        tiles.append(Tile(roomsmod.PLAIN_NAME, roomsmod.PLAIN, "", roomsmod.PLAIN_NOTE, roomsmod.plain_thumbnail()))   # always on offer
         self.vr.set_rooms(tiles)
 
     def _vr_room_chosen(self, folder: str) -> None:

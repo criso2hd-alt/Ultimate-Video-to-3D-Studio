@@ -10,6 +10,11 @@ import json
 from dataclasses import dataclass
 from pathlib import Path
 
+#: What stands for "the plain built-in room" (a dark room with a mirror floor, no baked room at all) in settings and on the Rooms page.
+PLAIN = "plain"
+PLAIN_NAME = "Plain room"
+PLAIN_NOTE = "Mirror floor"
+
 THUMBNAILS = ("thumbnail.jpg", "thumbnail.jpeg", "thumbnail.png", "preview.jpg", "preview.png")
 
 
@@ -18,6 +23,41 @@ class RoomEntry:
     name: str
     folder: Path
     thumbnail: Path | None
+
+
+def plain_thumbnail():
+    """A small painted picture of the plain room (a screen over a dark floor that reflects it), for its card on the Rooms page."""
+    from PySide6.QtCore import QRectF, Qt
+    from PySide6.QtGui import QBrush, QColor, QImage, QLinearGradient, QPainter
+
+    w, h = 640, 360
+    image = QImage(w, h, QImage.Format.Format_RGB32)
+    p = QPainter(image)
+    p.setRenderHint(QPainter.RenderHint.Antialiasing)
+    back = QLinearGradient(0, 0, 0, h)
+    back.setColorAt(0.0, QColor("#07090f"))
+    back.setColorAt(0.62, QColor("#0c1018"))
+    back.setColorAt(1.0, QColor("#05070b"))
+    p.fillRect(0, 0, w, h, QBrush(back))
+    floor_y = h * 0.62
+    screen = QRectF(w * 0.2, h * 0.13, w * 0.6, (w * 0.6) * 9 / 16)
+    if screen.bottom() > floor_y - 8:
+        screen = QRectF(w * 0.25, h * 0.1, w * 0.5, (w * 0.5) * 9 / 16)
+    glow = QLinearGradient(screen.left(), 0, screen.right(), 0)
+    glow.setColorAt(0.0, QColor("#4a5a78"))
+    glow.setColorAt(1.0, QColor("#2c3a56"))
+    p.setPen(Qt.PenStyle.NoPen)
+    p.setBrush(QBrush(glow))
+    p.drawRoundedRect(screen, 6, 6)
+    mirror = QLinearGradient(0, floor_y, 0, h)                    # the floor: the screen again, upside down, fading away
+    mirror.setColorAt(0.0, QColor(74, 90, 120, 120))
+    mirror.setColorAt(1.0, QColor(44, 58, 86, 0))
+    p.setBrush(QBrush(mirror))
+    p.drawRect(QRectF(screen.left(), floor_y, screen.width(), min(h - floor_y, screen.height() * 0.8)))
+    p.setBrush(QColor(255, 255, 255, 18))
+    p.drawRect(QRectF(0, floor_y - 1, w, 2))
+    p.end()
+    return image
 
 
 def find_rooms(root: Path) -> list[RoomEntry]:

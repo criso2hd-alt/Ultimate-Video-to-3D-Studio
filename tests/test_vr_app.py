@@ -166,7 +166,7 @@ def test_a_room_folder_must_hold_a_room_and_is_remembered_in_the_settings(win, t
     assert win.settings.vr_room_dir == str(good) and win._vr_room_dir() == good
     assert str(good) in win.settings_page.vr_room_label.text()
     win._clear_vr_room()
-    assert win.settings.vr_room_dir == "" and win._vr_room_dir() is None
+    assert win.settings.vr_room_dir == "plain" and win._vr_room_dir() is None                # the plain built-in room, chosen on purpose
 
 
 def test_a_room_in_the_data_folder_is_found_without_choosing_it(win, tmp_path):
@@ -281,7 +281,21 @@ def test_the_headsets_room_page_is_filled_from_the_rooms_folder_and_a_pick_is_re
         (tmp_path / "rooms" / folder / "room.json").write_text(json.dumps({"name": name}))
     win.vr.calls.clear()
     win._push_vr_rooms()
-    assert win.vr.calls[-1] == ("rooms", ["Grand cinema", "Home theatre"])
+    assert win.vr.calls[-1] == ("rooms", ["Grand cinema", "Home theatre", "Plain room"])        # the plain room is always one of the choices
     win._vr_room_chosen(str(tmp_path / "rooms" / "grand_cinema"))
     assert win.settings.vr_room_dir == str(tmp_path / "rooms" / "grand_cinema")
     assert win._vr_room_dir() == tmp_path / "rooms" / "grand_cinema"                 # and it is the room the next session starts in
+
+
+def test_the_plain_room_can_be_chosen_and_stays_chosen(win, tmp_path):
+    from ultimate_video_3d.vr.rooms import PLAIN
+
+    (tmp_path / "rooms" / "home_theatre").mkdir(parents=True)
+    (tmp_path / "rooms" / "home_theatre" / "room.glb").write_bytes(b"glTF")
+    assert win._vr_room_dir() == tmp_path / "rooms" / "home_theatre"                # nothing chosen: the first baked room
+    win._vr_room_chosen(PLAIN)                                                      # picked on the headset's Rooms page
+    assert win.settings.vr_room_dir == PLAIN and win._vr_room_dir() is None         # no baked room: the plain built-in one
+    win.settings.vr_room_dir = str(tmp_path / "rooms" / "home_theatre")
+    win._clear_vr_room()                                                            # Settings > "Use the plain room" means exactly that
+    assert win.settings.vr_room_dir == PLAIN and win._vr_room_dir() is None
+    assert "plain built-in room" in win.settings_page.vr_room_label.text()

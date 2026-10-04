@@ -456,3 +456,16 @@ def test_a_room_that_cannot_be_loaded_is_not_reported_as_chosen(vr, tmp_path):
     vr.start()
     vr._on_menu_action(("room", Tile("Broken", str(tmp_path))))                  # a folder with no room.glb: use_room says so and fails
     assert chosen == []
+
+
+def test_the_plain_room_is_a_choice_like_any_other(vr, tmp_path):
+    from ultimate_video_3d.vr.menu import Tile
+    from ultimate_video_3d.vr.rooms import PLAIN
+
+    vr.start()
+    used, chosen = [], []
+    vr.use_room = lambda folder: used.append(folder) or True
+    vr.room_chosen.connect(chosen.append)
+    vr._on_menu_action(("room", Tile("Plain room", PLAIN)))
+    assert used == [None] and chosen == [PLAIN]                                  # no folder at all: the built-in room
+    assert vr.room_key() == PLAIN                                                # and that is how the Rooms page names it before any room is loaded
