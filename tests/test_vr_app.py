@@ -345,3 +345,50 @@ def test_the_exit_watchdog_ends_a_process_that_would_otherwise_linger():
     thread = appmod._exit_watchdog(grace=0.05, kill=ended.append)
     thread.join(2.0)
     assert ended == [0] and thread.daemon                              # a daemon thread, so it also runs while Python waits for the others
+
+
+def test_fit_to_comfort_scans_the_film_and_sets_one_strength_for_all_of_it(win, qapp, monkeypatch):
+    import time as timemod
+
+    from ultimate_video_3d import comfort as comfortmod
+    from ultimate_video_3d import video as videomod
+
+    page = win.video_page
+    page.source, page.info = Path("film.mp4"), videomod.VideoInfo(1920, 1080, 24.0, 2400, False, 100.0)
+    page.disc_stream = None
+    win.settings.threed.strength = 50.0
+    seen = {}
+
+    def fake_scan(path, threed, start_ms, end_ms, progress=None, should_stop=None, **kw):
+        seen["args"] = (str(path), threed.strength, start_ms, end_ms)
+        progress(0.5)
+        return comfortmod.ComfortScan(strength=50.0, samples=[comfortmod.Sample(60_000, 2.5, 0.2), comfortmod.Sample(9000, 0.9, 0.1)])
+
+    monkeypatch.setattr(comfortmod, "scan", fake_scan)
+    page.threed.fit_comfortable.click()
+    deadline = timemod.time() + 5
+    while win._fit is not None and timemod.time() < deadline:
+        qapp.processEvents()
+        timemod.sleep(0.01)
+    qapp.processEvents()
+    assert win._fit is None and seen["args"][1:] == (50.0, 0.0, None)
+    assert win.settings.threed.strength == pytest.approx(20.0, abs=0.6)          # 2.5% -> 1.0% is 50 * 1.0 / 2.5
+    assert page.threed.strength.value() == pytest.approx(20.0, abs=0.6)
+    assert "strongest moment" in page.threed.fit_note.text() and page.threed.fit_comfortable.text() == "Fit to comfort"
+
+
+def test_the_gauge_is_updated_from_the_playing_frames_a_few_times_a_second(win):
+    from ultimate_video_3d import zones as zonesmod
+
+    page = win.video_page
+    seen = []
+    page.threed.set_depth_stats = seen.append
+    zones_now = zonesmod.DepthStats(out_pct=1.7, valid=True).to_dict()
+    import numpy as np
+
+    picture = np.zeros((36, 64, 3), np.uint8)
+    win._gauge_at = 0.0
+    win._on_buffered_image(([picture], "", False, 1.0, None, zones_now))
+    win._on_buffered_image(([picture], "", False, 1.0, None, zones_now))      # inside the same 150 ms: not again
+    assert len(seen) == 1 and seen[0].out_pct == pytest.approx(1.7)
+    win._on_buffered_image(([picture], "", False, 1.0, None))                  # an older 5-part payload still works

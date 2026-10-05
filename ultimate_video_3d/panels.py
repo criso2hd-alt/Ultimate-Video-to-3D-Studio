@@ -321,6 +321,7 @@ class ThreeDPanel(ModuleCard):
     """The 2D -> 3D conversion controls."""
 
     changed = Signal()
+    fit_requested = Signal(float)           # look through the whole film and set the strength so its strongest moment sits at this % of the width
 
     def __init__(self, s: ThreeDSettings, parent: QWidget | None = None) -> None:
         super().__init__("3D conversion", "AI depth", checkable=True, parent=parent)
@@ -349,6 +350,27 @@ class ThreeDPanel(ModuleCard):
         self.strength.setToolTip(self.strength.toolTip() + "\n\nThe coloured strip under the slider shows how strong the "
                                  "effect is for this picture: green = comfortable, amber = strong, red = too strong.")
         self.add(self.strength)
+        # One setting for the whole film: find its strongest moment and scale the strength so that moment is just comfortable.
+        self.fit_comfortable = QPushButton("Fit to comfort")
+        self.fit_strong = QPushButton("Fit to strong")
+        for button, limit, tip in (
+            (self.fit_comfortable, zonesmod.COMFORT, "Looks through the whole video (or the In to Out part) for the moment that comes out of "
+             "or sinks behind the screen the most, and sets the 3D strength so that moment is just comfortable. Every other moment is "
+             "scaled with it: one setting for the film, nothing animates."),
+            (self.fit_strong, zonesmod.STRONG, "The same, but allows the strongest moment to reach the strong limit (twice as far)."),
+        ):
+            button.setObjectName("secondary")
+            button.setToolTip(tip)
+            button.clicked.connect(lambda _=False, v=limit: self.fit_requested.emit(float(v)))
+        fit_row = QHBoxLayout()
+        fit_row.addWidget(self.fit_comfortable)
+        fit_row.addWidget(self.fit_strong)
+        self.add_layout(fit_row)
+        self.fit_note = QLabel("")
+        self.fit_note.setObjectName("hint")
+        self.fit_note.setWordWrap(True)
+        self.fit_note.setVisible(False)
+        self.add(self.fit_note)
         self.convergence = ParamSlider("Depth position", 0, 100, s.convergence, 55, 0,
                                        tooltip="Where the screen sits inside the scene. Low pulls everything "
                                                "out of the screen; high pushes it behind, like a window.")
@@ -400,6 +422,13 @@ class ThreeDPanel(ModuleCard):
         for widget in self._adv_widgets:
             self.add(widget)
             widget.setVisible(False)
+
+    def set_fit_state(self, running: bool, text: str = "") -> None:
+        """Show a film-wide scan's progress or result under the buttons; while it runs either button stops it."""
+        self.fit_comfortable.setText("Stop" if running else "Fit to comfort")
+        self.fit_strong.setEnabled(not running)
+        self.fit_note.setText(text)
+        self.fit_note.setVisible(bool(text))
 
     def set_depth_stats(self, stats: zonesmod.DepthStats) -> None:
         """Show where the current picture sits, on the gauge and as the marks under Depth position."""

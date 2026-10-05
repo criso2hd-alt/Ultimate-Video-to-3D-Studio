@@ -156,6 +156,7 @@ class CachedFrame:
     files: list[Path] = field(default_factory=list)     # set when stored on disk
     scope_file: Path | None = None
     size: int = 0                                       # bytes held (memory or disk)
+    zones: dict | None = None                           # the depth gauge's numbers for this frame (zones.DepthStats.to_dict), a few hundred bytes
 
     def load(self) -> tuple[list[bytes], bytes] | None:
         """(picture JPEGs, scope JPEG), or None if the files are gone (the cache was just cleared)."""
@@ -232,7 +233,7 @@ class RenderCache:
             scope_file = self._dir / f"{generation}_{index:07d}_s.jpg"
             scope_file.write_bytes(frame.scope)
         size = sum(len(d) for d in frame.jpegs) + len(frame.scope)
-        return CachedFrame([], frame.badge, frame.wiggle, frame.hole_pct, b"", files, scope_file, size)
+        return CachedFrame([], frame.badge, frame.wiggle, frame.hole_pct, b"", files, scope_file, size, frame.zones)
 
     def put(self, index: int, frame: CachedFrame, generation: int | None = None) -> None:
         """Store a finished frame. ``generation`` is the clear-count the renderer started under."""
@@ -531,7 +532,7 @@ class BufferedRenderer:
                 scope = _encode(result.scope, 85) if result.scope is not None else b""
                 cache.put(index, CachedFrame(
                     [_encode(img) for img in result.images], result.badge, result.wiggle,
-                    float(result.stats.get("hole_pct", 0.0)), scope), gen)
+                    float(result.stats.get("hole_pct", 0.0)), scope, zones=result.stats.get("zones")), gen)
                 self._puts += 1
                 if self._puts % 60 == 0 and self._housekeeping is not None:
                     self._housekeeping(self._index(self._clock.now()))
@@ -873,7 +874,7 @@ class BufferedPlayback(QObject):
             pictures, scope = loaded
             self._last_shown = index
             self.image.emit(([_decode(j) for j in pictures], frame.badge, frame.wiggle, frame.hole_pct,
-                             _decode(scope) if scope else None))
+                             _decode(scope) if scope else None, frame.zones))
             self.position.emit(int(now))
         wait = ((index + 1) * 1000.0 / fps - self._clock.now()) / 1000.0
         time.sleep(min(max(wait, 0.002), 0.02))

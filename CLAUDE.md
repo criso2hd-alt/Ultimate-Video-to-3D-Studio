@@ -478,6 +478,17 @@ RTX 4080 draws the room with the lights down and the beam on in 3.9 ms; the rest
 the feeder's dropped/late frames every 30 s while a film plays. `app._exit_watchdog` ends the process 8 s after the window closes if Python is
 still waiting on a thread - a lingering process kept the VR runtime busy and blocked the next start.
 
+**Gauge while playing, and "Fit to comfort" (2026-10-04).** The depth gauge, the strength strip and the depth-position marks used to move only when the
+picture was paused (stats rode on the live path's `PreviewResult` only). `buffered.CachedFrame.zones` now carries each frame's `zones.DepthStats` dict through
+the cache (it survives the spill to disk) and `BufferedPlayback.image` emits it as a 6th element; `MainWindow._on_buffered_image` updates the gauge at most every
+`GAUGE_EVERY` (0.15 s), and still accepts the old 5-part payload. The 3D panel has **Fit to comfort / Fit to strong** (`ThreeDPanel.fit_requested`): `comfort.scan`
+samples 240 places in the film (or the In/Out range; ~0.14 s each, ~35 s on a feature, run by `app.FitScan` on its own thread, the button turns into Stop), measures
+each with the person's current settings through the same depth model/refine/disparity code as the preview (`measure_picture`), takes the worst
+frame (`max(out_pct, back_pct)`, the gauge's 99th percentile) and sets ONE strength for the whole film: `strength * limit / worst`
+(disparity is linear in strength), clamped to 0..100 (a gentle film is raised to fit). Limits are `zones.COMFORT` 1% / `zones.STRONG` 2% of the width. Nothing animates and no
+scene is treated differently. Because the depth model rescales every frame to span 0..1, most frames of a film read nearly alike (Cloudy: median = worst = 1.4% at
+strength 50), so the answer is stable; it can miss a one-second flash between samples (the note says how many places were checked).
+
 ## Planned for 0.2: macOS
 
 macOS is written but untested (0.2 will test it on an Apple Silicon MacBook Pro).

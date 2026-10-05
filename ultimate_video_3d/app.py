@@ -42,6 +42,7 @@ from PySide6.QtWidgets import (
 from .discdialog import DiscDialog
 from . import library as librarymod
 from . import zones as zonesmod
+from . import comfort as comfortmod
 from . import resume as resumemod
 from .folderdialog import FolderDialog
 from .librarypage import LibraryPage
@@ -211,6 +212,33 @@ class ModelDownloadWorker(QObject):
             self.failed.emit(str(error))
             return
         self.finished.emit()
+
+
+class FitScan(QObject):
+    """Runs ``comfort.scan`` on a thread of its own and reports through signals (the window never waits for it)."""
+
+    progress = Signal(float)
+    finished = Signal(object)
+    failed = Signal(str)
+
+    def __init__(self, path, threed, start_ms: float, end_ms: float | None, parent=None) -> None:
+        super().__init__(parent)
+        self._args = (path, threed, start_ms, end_ms)
+        self._stop = threading.Event()
+
+    def start(self) -> None:
+        threading.Thread(target=self._run, name="uv3d-fit-scan", daemon=True).start()
+
+    def stop(self) -> None:
+        self._stop.set()
+
+    def _run(self) -> None:
+        try:
+            path, threed, start_ms, end_ms = self._args
+            result = comfortmod.scan(path, threed, start_ms, end_ms, progress=self.progress.emit, should_stop=self._stop.is_set)
+            self.finished.emit(result)
+        except Exception as error:  # noqa: BLE001 - reported in the panel, never allowed to take the app down
+            self.failed.emit(f"{type(error).__name__}: {error}")
 
 
 class ConvertWorker(QObject):
@@ -799,6 +827,8 @@ class MainWindow(QMainWindow):
         self._probe_dialog: DownloadDialog | None = None
         self._eta = _EtaTracker()
         self._convert_began, self._convert_note, self._convert_fps = 0.0, "", 0.0
+        self._gauge_at = 0.0
+        self._fit = None                                  # the running "fit the strength to the whole film" scan
         self._converting = False
         #: (proxy frame, id) written by the decode thread as one atomic assignment.
         self._current: tuple[np.ndarray, int] | None = None
@@ -1101,8 +1131,12 @@ class MainWindow(QMainWindow):
         """A frame from the look-ahead cache, shown on the playback clock."""
         if self._converting:
             return
-        images, badge, wiggle, hole_pct, scope = payload
+        images, badge, wiggle, hole_pct, scope = payload[:5]
+        zones_now = payload[5] if len(payload) > 5 else None
         page = self.video_page
+        if zones_now and time.monotonic() - self._gauge_at > GAUGE_EVERY:      # the gauge follows the film while it plays, a few times a second
+            self._gauge_at = time.monotonic()
+            page.threed.set_depth_stats(zonesmod.DepthStats.from_dict(zones_now))
         if scope is not None and page.colour.is_open():
             page.colour.scope.set_frame(scope)            # the scopes keep following the picture while it plays
         page.preview.set_images(images, badge, wiggle)
@@ -1172,6 +1206,7 @@ class MainWindow(QMainWindow):
         page.colour.changed.connect(self._params_changed)
         page.lut.changed.connect(self._params_changed)
         page.export.changed.connect(self._export_changed)
+        page.threed.fit_requested.connect(self._fit_strength)
         page.export.range_box.currentIndexChanged.connect(self._range_mode)
         page.export.set_rate_context(self._rate_context)
         page.timeline.in_changed.connect(lambda _f: page.export.refresh_rates())
@@ -1223,6 +1258,47 @@ class MainWindow(QMainWindow):
         if not self.settings.threed.enabled:
             self.video_page.threed.setChecked(True)          # previewing 3D implies converting to 3D
             self.settings.threed.enabled = True
+
+    # -- fit the strength to the whole film --------------------------------------------------------------
+
+    def _fit_strength(self, limit: float) -> None:
+        """Scan the film for its strongest moment and set the 3D strength so that moment sits at ``limit`` % of the width."""
+        page = self.video_page
+        if self._fit is not None:                              # the button now says Stop
+            self._fit.stop()
+            return
+        if page.source is None or page.disc_stream is not None or page.info is None:
+            page.threed.set_fit_state(False, "Open a video file first (a title read straight from a disc cannot be scanned).")
+            return
+        if self._converting:
+            return
+        start_ms, end_ms = 0.0, None
+        if self.settings.export.range_mode == "range":
+            first, last = page.timeline.in_out()
+            fps = page.info.fps or 24.0
+            start_ms, end_ms = first / fps * 1000.0, (last + 1) / fps * 1000.0
+        self._fit_limit = limit
+        self._fit = FitScan(page.source, copy.deepcopy(self.settings.threed), start_ms, end_ms, self)
+        self._fit.progress.connect(lambda f: page.threed.set_fit_state(True, f"Looking through the film... {f * 100:.0f}% (press Stop to cancel)"))
+        self._fit.finished.connect(self._fit_done)
+        self._fit.failed.connect(self._fit_failed)
+        page.threed.set_fit_state(True, "Looking through the film... 0% (press Stop to cancel)")
+        self._fit.start()
+
+    def _fit_done(self, result) -> None:
+        threed = self.video_page.threed
+        self._fit = None
+        if result.stopped:
+            threed.set_fit_state(False, "Stopped. The strength was not changed.")
+            return
+        strength = result.strength_for(self._fit_limit)
+        threed.set_fit_state(False, comfortmod.describe(result, self._fit_limit, strength))
+        if strength is not None:
+            threed.strength.set_value(strength, emit=True)         # through the normal path: settings, preview and the gauge follow
+
+    def _fit_failed(self, message: str) -> None:
+        self._fit = None
+        self.video_page.threed.set_fit_state(False, f"Could not look through the film: {message}")
 
     def _picture_clicked(self) -> None:
         """A click anywhere on the picture plays or pauses, like a streaming player."""
@@ -2258,6 +2334,8 @@ def main() -> None:
     _exit_watchdog()
     sys.exit(code)
 
+
+GAUGE_EVERY = 0.15                                    # seconds between gauge updates while a film plays
 
 EXIT_GRACE_SECONDS = 8.0
 
