@@ -8,7 +8,7 @@
 
 Side-by-Side · Top-and-Bottom · Anaglyph · Colour + Depth, for VR headsets, 3D TVs, projectors and red/cyan glasses.
 
-[![Download](https://img.shields.io/badge/⬇%20Download-Windows%20v0.1.0-2ea44f.svg)](https://github.com/criso2hd-alt/Ultimate-Video-to-3D-Studio/releases/latest)
+[![Download](https://img.shields.io/badge/⬇%20Download-Windows%20v0.2.0-2ea44f.svg)](https://github.com/criso2hd-alt/Ultimate-Video-to-3D-Studio/releases/latest)
 [![Discord](https://img.shields.io/badge/Discord-join%20the%20community-5865F2.svg?logo=discord&logoColor=white)](https://discord.gg/mEfSW3XfNn)
 [![Platform](https://img.shields.io/badge/Windows-11-0078D4.svg)](#download)
 [![Any GPU](https://img.shields.io/badge/GPU-NVIDIA%20·%20AMD%20·%20Intel-76b900.svg)](#how-it-works)
@@ -39,7 +39,8 @@ tests which video encoders your graphics card can use; a short tutorial follows.
 Windows may show a *SmartScreen* warning because the app is not code-signed yet: choose **More info →
 Run anyway**. (Only download it from this repository's Releases page.)
 
-Requires Windows 11 (64-bit) and a DirectX 12 graphics card. **macOS is coming in 0.2.**
+Requires Windows 11 (64-bit) and a DirectX 12 graphics card. **macOS is next**: it is written but not yet tested on real hardware.
+For VR you also need an OpenXR headset (Meta Quest via Link, SteamVR, Virtual Desktop...).
 
 ## Screenshots
 
@@ -57,6 +58,19 @@ Real screenshots of the app, taken at **2560 × 1440**. The footage is a scene g
 | Every codec, with your GPU's encoder picked for you | A guided tutorial on first launch |
 | :---: | :---: |
 | [<img src="docs/screenshots/export.png" alt="Export settings">](docs/screenshots/export.png) | [<img src="docs/screenshots/tutorial.png" alt="The spotlight tutorial highlighting the view bar">](docs/screenshots/tutorial.png) |
+
+## What's new in 0.2
+
+- **Watch in VR.** Put on a headset and watch your converted videos in a baked virtual home theatre (a cinema-style screen,
+  seats you can move between, lights that dim while the film plays, a projector beam). A menu in the headset has a timeline,
+  skip buttons, volume, lights, seats and rooms. Start it with the **Start VR** button in the Library. Black bars burned into
+  a wide film are trimmed so it fills the screen.
+- **Quality, bitrate or file size** - three linked controls: change one and the other two follow, so you can aim at a size.
+- **Copy your own discs to a file** and convert that, and **open a whole folder of rips**, choosing the audio track and subtitles.
+- **Pause and resume** long conversions; a progress panel on the picture shows elapsed and remaining time.
+- **Depth zones:** a live gauge of how far things come out of or sink behind the screen, which now follows the film while it
+  plays, plus **Fit to comfort**: one press scans the whole film for its strongest moment and sets one 3D strength for all of it.
+- **Cleaner edges** around near objects (no more black dots), and conversion is faster (about 1.8x on the test machine).
 
 ## What it does
 
@@ -165,7 +179,7 @@ be turned off (or run on demand) in Settings → Updates. It sends one anonymous
 ## Tests
 
 ```
-python -m pytest        # ~130 tests, about a minute, no GPU or model needed
+python -m pytest        # ~420 tests, about 15 minutes, no GPU or model needed
 ```
 
 ## Status and known gaps
@@ -174,9 +188,10 @@ Working and tested on Windows 11 (NVIDIA + DirectML): everything above.
 
 Not yet done / not yet verified — stated plainly:
 
-- **macOS is written but untested**, and is not part of 0.1: CoreML depth, VideoToolbox
+- **macOS is written but untested**, and is not part of 0.2: CoreML depth, VideoToolbox
   encoding, GPU readout via `ioreg`, the `.app` build. It will be tested on an Apple Silicon
-  MacBook Pro and released with 0.2.
+  MacBook Pro before it is released.
+- **VR** is Windows-only and has been tried on a Meta Quest 3 over Link; other OpenXR runtimes and headsets are untested.
 - **AMD (AMF) and Intel (Quick Sync) encoders** are in the ladder and the FFmpeg
   build includes them, but have only been exercised on NVIDIA hardware.
 - The live preview of an **HDR source** is tone-mapped to SDR for the screen; exports keep
@@ -188,15 +203,8 @@ Not yet done / not yet verified — stated plainly:
 
 ## Planned
 
-- **Version 0.2: macOS, and your own discs.** A Mac build tested on real hardware, and a
-  "Choose external disc" source: copy a DVD or Blu-ray you own to a file on disk first (as fast as
-  the drive allows), then convert that. Movie-length conversions will get pause and resume.
-- **VR headset preview and player (OpenXR).** With any OpenXR headset connected
-  (Meta Quest via Link/Air Link, SteamVR, Virtual Desktop, WMR…), put it on and see the
-  converted video on a large virtual screen: move and resize the screen, with the stereo
-  layout (side-by-side, top-and-bottom, full/half) applied automatically from the chosen
-  output, plus a basic player (play/pause, seek, volume) driven by the controllers.
-  Later: selectable environments/backgrounds.
+- **macOS**, tested on real hardware.
+- **More VR rooms**, and depth limits that adapt to the size of the screen in the room.
 
 ## Layout
 
