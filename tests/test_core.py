@@ -82,6 +82,59 @@ def test_ragged_depth_leaves_no_black_dots_in_either_eye():
         assert pair.left.max(axis=2).min() > 0.5 and pair.right.max(axis=2).min() > 0.5
 
 
+def _disc_on_sky(w=960, h=540):
+    """A dark disc on a bright sky with an anti-aliased edge, and depth worked out at a third of the size and scaled up (as
+    the app does): the depth edge is a soft slope a few pixels wide that moves in little stairs from row to row."""
+    import cv2
+
+    yy, xx = np.mgrid[0:h, 0:w].astype(np.float32)
+    dist = np.sqrt(((xx - 450.0) / 0.8) ** 2 + (yy - 270.0) ** 2)
+    cover = np.clip(160.0 - dist + 0.5, 0, 1)
+    rgb = np.empty((h, w, 3), np.float32)
+    rgb[...] = (0.62, 0.76, 0.86)
+    rgb = rgb * (1 - cover[..., None]) + 0.12 * cover[..., None]
+    small = cv2.resize(cover, (w // 3, h // 3), interpolation=cv2.INTER_AREA)
+    d = cv2.resize(0.15 + 0.75 * small, (w, h), interpolation=cv2.INTER_LINEAR).astype(np.float32)
+    return np.ascontiguousarray(rgb, np.float32), d
+
+
+def _edge_roughness(img, rows):
+    """How ragged the disc's right-hand edge is: the mean second difference of where each row turns to sky (a smooth curve ~0.4)."""
+    lum = img.mean(axis=2)
+    xs = []
+    for y in rows:
+        bright = np.nonzero(lum[y, 450:] > 0.45)[0]
+        xs.append(450 + bright[0] if bright.size else np.nan)
+    xs = np.array(xs, float)
+    return float(np.nanmean(np.abs(xs[2:] - 2 * xs[1:-1] + xs[:-2])))
+
+
+def test_the_edge_that_opens_up_stays_smooth_instead_of_turning_into_a_saw_tooth():
+    """Regression (Discord, a dark-rimmed ship on a bright sky): the soft, stair-stepped depth edge was stretched across the
+    uncovered sky by a different amount on every row, a saw-tooth fringe in one eye at any strength. Measured on the eye where
+    the disc's right edge opens up: 0.86 before the fix, 0.34 after, 0.38 for the source itself."""
+    rgb, d = _disc_on_sky()
+    rows = range(200, 340)
+    for strength in (30, 36, 60):
+        pair = stereo.synthesize(rgb, d, stereo.StereoParams(strength=strength, convergence=0.55))
+        assert _edge_roughness(pair.right, rows) < 0.55
+        assert _edge_roughness(pair.left, rows) < 0.55
+
+
+def test_the_step_filter_leaves_gentle_slopes_and_thin_details_alone():
+    h, w = 20, 400
+    ramp = np.tile(np.linspace(0.2, 0.8, w, dtype=np.float32), (h, 1))           # a floor or a wall: a gentle slope
+    spikes = np.full((h, w), 0.2, np.float32)
+    spikes[:, 100:103] = 0.9                                                      # a strand of hair: near in the middle, far either side
+    spikes[:, 200:203] = 0.9
+    params = stereo.StereoParams(strength=100, convergence=0.55)
+    for d in (ramp, spikes):
+        disp = stereo.disparity_map(d, params, w)
+        out_d, out_s = np.empty_like(d), np.empty_like(disp)
+        stereo._steps(d, disp, out_d, out_s, 6, np.float32(stereo.STEP_MIN_PX))
+        assert np.array_equal(out_d, d) and np.array_equal(out_s, disp)
+
+
 def test_no_cracks_on_smooth_slope():
     """Regression: a span holding exactly one pixel used to be skipped, leaving 1px cracks."""
     h, w = 40, 400

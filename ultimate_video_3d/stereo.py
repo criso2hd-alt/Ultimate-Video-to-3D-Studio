@@ -72,13 +72,77 @@ class StereoParams:
 
 SLIVER = 2          # a run of picture this short between two holes is edge fringe, not picture
 REACH = 48          # how far into the background the hole filler looks for texture to reflect
+#: Steep depth slopes narrower than this share of the picture width are object edges, made into a clean step before the
+#: warp (``_steps``); and this many pixels of background next to an uncovered gap are replaced too (``_warp``'s ``erode``).
+STEP_RADIUS = 1.0 / 320.0
+STEP_MIN_PX = 4.0   # a slope must change the disparity by more than this (full, both eyes) inside the window to count as an edge
+ERODE = 1.0 / 480.0
 
 
 @njit(parallel=True, fastmath=True, cache=True, nogil=True)
-def _warp(src, depth, shift, out, hole, edge_thresh):
+def _steps(depth, disp, depth_out, disp_out, radius, min_jump):
+    """Turn steep, soft depth slopes into clean steps, row by row (disparity is horizontal).
+
+    The depth model works at 518 px and the cleanup at 640 px, so at 1080p an object's depth edge is a slope ~12 px wide
+    with a small stair every few rows, while the picture's own edge is sharp. Warped as it was, the slope stretched the
+    object's rim across the uncovered background by a different amount on every row: a saw-tooth fringe along every edge
+    on the side that opens up (reported on Discord on a bright sky behind a dark-rimmed disc). Here each pixel on a slope
+    that changes the disparity by more than ``min_jump`` within ``radius`` takes the nearer of the local minimum and
+    maximum, so the object moves as one piece and the gap is left whole for the hole filler. Gentle slopes (floors,
+    walls) change far less than that inside the window and are left alone, and so is fine detail (see below).
+    """
+    height, width = depth.shape
+    for y0 in prange(height):
+        y = np.int64(y0)
+        for x in range(width):
+            lo_i = max(0, x - radius)
+            hi_i = min(width - 1, x + radius)
+            if abs(disp[y, hi_i] - disp[y, lo_i]) < 0.5 * min_jump:
+                disp_out[y, x] = disp[y, x]                 # flat or gently sloping here: nearly every pixel leaves here
+                depth_out[y, x] = depth[y, x]
+                continue
+            dmin = disp[y, x]
+            dmax = disp[y, x]
+            zmin = depth[y, x]
+            zmax = depth[y, x]
+            for k in range(lo_i, hi_i + 1):
+                v = disp[y, k]
+                if v < dmin:
+                    dmin = v
+                    zmin = depth[y, k]
+                if v > dmax:
+                    dmax = v
+                    zmax = depth[y, k]
+            v = disp[y, x]
+            # Only a single smooth slope: one way all through the window (small wobbles allowed). Hair, leaves and other
+            # fine detail zig-zag in depth; made into hard steps they broke up into dark speckles and stripes.
+            steep = dmax - dmin > min_jump
+            if steep:
+                rising = disp[y, hi_i] >= disp[y, lo_i]
+                wobble = 0.15 * (dmax - dmin)
+                for k in range(lo_i, hi_i):
+                    step = disp[y, k + 1] - disp[y, k]
+                    if (rising and step < -wobble) or ((not rising) and step > wobble):
+                        steep = False
+                        break
+            if steep:
+                if v - dmin < dmax - v:
+                    disp_out[y, x] = dmin
+                    depth_out[y, x] = zmin
+                else:
+                    disp_out[y, x] = dmax
+                    depth_out[y, x] = zmax
+            else:
+                disp_out[y, x] = v
+                depth_out[y, x] = depth[y, x]
+
+
+@njit(parallel=True, fastmath=True, cache=True, nogil=True)
+def _warp(src, depth, shift, out, hole, edge_thresh, erode):
     """Forward-warp ``src`` by per-pixel ``shift`` (pixels), z-tested by ``depth``.
 
-    ``out`` receives the image, ``hole`` marks pixels that had to be invented.
+    ``out`` receives the image, ``hole`` marks pixels that had to be invented. ``erode`` pixels of background next to
+    an uncovered gap are replaced as well: they are usually the object's blended rim, left behind with background depth.
     """
     height, width, _ = src.shape
     for y in prange(height):
@@ -161,6 +225,20 @@ def _warp(src, depth, shift, out, hole, edge_thresh):
                     for c in range(3):
                         out[y, tx, c] = 0.0
                 continue
+            if have_left and have_right and b - a + 1 >= erode and abs(zbuf[a - 1] - zbuf[b + 1]) > 0.02:
+                # (only a real opening: the tiny gaps between strands of hair or leaves are left alone, or fine detail breaks up)
+                # A real uncovered gap: its first background pixels are mostly the moved object's soft rim, which
+                # kept background depth. Copied as background they become a dark ghost of the edge; replace them too.
+                # (At least two pixels of background are kept to take texture from.)
+                k = 0
+                if use_left:
+                    while k < erode and a - 3 >= 0 and filled[a - 2] and filled[a - 3]:
+                        a -= 1
+                        k += 1
+                else:
+                    while k < erode and b + 3 < width and filled[b + 2] and filled[b + 3]:
+                        b += 1
+                        k += 1
             length = b - a + 1
             # how many pixels of real picture lie beyond the hole on the background side
             run = 0
@@ -186,7 +264,7 @@ def _warp(src, depth, shift, out, hole, edge_thresh):
         # The reflected fill is smoothed a little across the hole, so a high-contrast edge that was
         # reflected does not show as a pattern; only invented pixels are touched.
         for x in range(1, width - 1):
-            if hole[y, x] and not filled[x]:
+            if hole[y, x]:
                 for c in range(3):
                     out[y, x, c] = (out[y, x - 1, c] + 2.0 * out[y, x, c] + out[y, x + 1, c]) * 0.25
 
@@ -254,12 +332,16 @@ def synthesize(rgb: np.ndarray, depth: np.ndarray, params: StereoParams, buffers
     edge = max(0.75, 0.0006 * width)   # a per-pixel disparity step this large is an object edge, not a slope
     outs = []
     pictures, holes = buffers.get(rgb.shape) if buffers is not None else (None, None)
+    radius = max(2, int(round(width * STEP_RADIUS)))
+    erode = max(1, int(round(width * ERODE)))
     with LOCK:
         disp = disparity_map(depth, params, width)
+        stepped_depth, stepped = np.empty_like(depth), np.empty_like(disp)
+        _steps(depth, disp, stepped_depth, stepped, radius, np.float32(STEP_MIN_PX))
         for i, sign in enumerate((+0.5, -0.5)):
             out = pictures[i] if pictures is not None else np.empty_like(rgb)
             hole = holes[i] if holes is not None else np.empty((height, width), np.uint8)
-            _warp(rgb, depth, np.ascontiguousarray(disp * np.float32(sign)), out, hole, np.float32(edge))
+            _warp(rgb, stepped_depth, np.ascontiguousarray(stepped * np.float32(sign)), out, hole, np.float32(edge), erode)
             outs.append((out, hole))
     (left, hole_l), (right, hole_r) = outs
     if params.swap_eyes:

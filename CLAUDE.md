@@ -489,6 +489,19 @@ frame (`max(out_pct, back_pct)`, the gauge's 99th percentile) and sets ONE stren
 scene is treated differently. Because the depth model rescales every frame to span 0..1, most frames of a film read nearly alike (Cloudy: median = worst = 1.4% at
 strength 50), so the answer is stable; it can miss a one-second flash between samples (the note says how many places were checked).
 
+**Saw-tooth edges (after 0.2.0, Discord report on a dark-rimmed ship against a bright sky).** In the eye where an object's edge
+opens up, the edge turned into a jagged dark comb at any strength. Cause: the depth is cleaned up at 640 px and scaled up, so at 1080p
+an object's depth edge is a soft slope ~12 px wide that moves in little stairs every ~3 rows, while the picture's edge is sharp; the
+warp stretched the dark rim across the uncovered background by a different amount on every row. Fix in `stereo.py`: `_steps` turns a
+steep *single, one-way* slope (disparity change > `STEP_MIN_PX` inside `STEP_RADIUS` of the width, monotonic within 15%) into a hard
+step before the warp (nearer of the local min/max), so the object moves as one piece; gentle slopes, and anything that zig-zags in
+depth (hair, leaves - made into steps they broke up into dark speckles), are left alone. `_warp(..., erode)` also replaces `ERODE` of
+the width (4 px at 1080p) of background next to a real opening (at least that wide, depth difference > 0.02): those pixels are mostly the
+object's blended rim left behind with background depth. Tried and dropped: a full-resolution guided-filter snap of the depth (removes
+some stairs, 53 ms/frame); counting "middle" pixels to demand wide slopes (made the edge notched). Cost ~+5 ms/frame. Test:
+`test_the_edge_that_opens_up_stays_smooth_instead_of_turning_into_a_saw_tooth` (edge roughness 0.86 before, 0.34 after, source 0.38).
+Fine hair against a dark background still shows a few small speckles: the depth model cannot resolve hair at 518 px.
+
 ## Planned for 0.2: macOS
 
 macOS is written but untested (0.2 will test it on an Apple Silicon MacBook Pro).

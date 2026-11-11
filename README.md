@@ -8,7 +8,7 @@
 
 Side-by-Side · Top-and-Bottom · Anaglyph · Colour + Depth, for VR headsets, 3D TVs, projectors and red/cyan glasses.
 
-[![Download](https://img.shields.io/badge/⬇%20Download-Windows%20v0.2.0-2ea44f.svg)](https://github.com/criso2hd-alt/Ultimate-Video-to-3D-Studio/releases/latest)
+[![Download](https://img.shields.io/badge/⬇%20Download-Windows%20v0.2.1-2ea44f.svg)](https://github.com/criso2hd-alt/Ultimate-Video-to-3D-Studio/releases/latest)
 [![Discord](https://img.shields.io/badge/Discord-join%20the%20community-5865F2.svg?logo=discord&logoColor=white)](https://discord.gg/mEfSW3XfNn)
 [![Platform](https://img.shields.io/badge/Windows-11-0078D4.svg)](#download)
 [![Any GPU](https://img.shields.io/badge/GPU-NVIDIA%20·%20AMD%20·%20Intel-76b900.svg)](#how-it-works)
@@ -70,7 +70,7 @@ Real screenshots of the app, taken at **2560 × 1440**. The footage is a scene g
 - **Pause and resume** long conversions; a progress panel on the picture shows elapsed and remaining time.
 - **Depth zones:** a live gauge of how far things come out of or sink behind the screen, which now follows the film while it
   plays, plus **Fit to comfort**: one press scans the whole film for its strongest moment and sets one 3D strength for all of it.
-- **Cleaner edges** around near objects (no more black dots), and conversion is faster (about 1.8x on the test machine).
+- **Cleaner edges** around near objects (no black dots, and since 0.2.1 no saw-tooth fringe), and conversion is faster (about 1.8x on the test machine).
 
 ## What it does
 

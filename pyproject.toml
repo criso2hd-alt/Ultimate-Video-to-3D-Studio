@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "ultimate-video-3d-studio"
-version = "0.2.0"
+version = "0.2.1"
 description = "Turn flat video into stereoscopic 3D with AI depth. Any GPU, Windows and macOS."
 readme = "README.md"
 license = {file = "LICENSE"}
