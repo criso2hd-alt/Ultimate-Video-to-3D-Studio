@@ -83,6 +83,16 @@ class PreviewParams:
     depth_mode: str = "standard"
     colour: grade.ColourSettings = field(default_factory=grade.ColourSettings)
     force_cpu: bool = False
+    depth_model: str = "fast"
+    nvidia: bool = False
+
+    def engine(self, progress=None) -> "depthmod.DepthEngine":
+        """The shared depth engine these settings call for (loaded on first use, then resident)."""
+        return depthmod.shared_engine(self.force_cpu, progress, self.depth_model, self.nvidia)
+
+    @property
+    def engine_key(self) -> tuple[str, bool, bool]:
+        return depthmod.engine_key(self.force_cpu, self.depth_model, self.nvidia)
 
     @property
     def needs_depth(self) -> bool:
@@ -200,10 +210,10 @@ class PreviewEngine(QObject):
 
     # -- depth thread ------------------------------------------------------
 
-    def _ensure_engine(self, force_cpu: bool) -> None:
-        if self._engine is not None and (self._engine.device == "CPU") == force_cpu:
+    def _ensure_engine(self, params: "PreviewParams") -> None:
+        if self._engine is not None and self._engine.key == params.engine_key:
             return
-        self._engine = depthmod.shared_engine(force_cpu)
+        self._engine = params.engine()
         self.device_ready.emit(self._engine.device)
         self._steady, self._steady_id = None, -1
 
@@ -216,12 +226,12 @@ class PreviewEngine(QObject):
                 steady, depth_ms = None, 0.0
                 p = job.params
                 if p.needs_depth:
-                    self._ensure_engine(p.force_cpu)
+                    self._ensure_engine(p)
                     self._stab.smoothing = float(np.clip(p.temporal / 100.0 * 0.95, 0.0, 0.95))
                     if job.new_frame or self._steady is None or self._steady_id != job.frame_id:
                         t = time.perf_counter()
                         small = _shrink(job.frame, 640)
-                        self._steady = self._stab(self._engine.infer(small), small)
+                        self._steady = self._stab.run(self._engine, small)
                         self._steady_id = job.frame_id
                         depth_ms = (time.perf_counter() - t) * 1000
                     steady = self._steady

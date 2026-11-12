@@ -72,20 +72,20 @@ def measure_picture(rgb: np.ndarray, engine, stabilizer: depthmod.DepthStabilize
     """The gauge's numbers for one picture (float32 RGB 0..1), exactly as the preview would work them out."""
     width = rgb.shape[1]
     stabilizer.reset()                                       # a single frame stands alone: no history from the last sample
-    steady = stabilizer(engine.infer(rgb), rgb)
+    steady = stabilizer.run(engine, rgb)
     d = depthmod.refine(steady, rgb, edge_aware, blur, mode)
     return zones.measure(stereo.disparity_map(d, params, width), d)
 
 
 def scan(path: str | Path, threed, start_ms: float = 0.0, end_ms: float | None = None, count: int = SAMPLES,
          engine=None, progress: Callable[[float], None] | None = None,
-         should_stop: Callable[[], bool] | None = None) -> ComfortScan:
+         should_stop: Callable[[], bool] | None = None, nvidia: bool = False) -> ComfortScan:
     """Sample the film and measure it with ``threed`` (a settings.ThreeDSettings: strength, depth position, near/far, cleanup)."""
     import av
 
     info = video.probe(path)
     end = (info.duration * 1000.0) if end_ms is None else end_ms
-    engine = engine or depthmod.shared_engine(False)
+    engine = engine or depthmod.shared_engine(False, None, getattr(threed, "depth_model", depthmod.FAST), nvidia)
     stab = depthmod.DepthStabilizer(0.0)
     params = threed.params()
     if params.strength <= 0:

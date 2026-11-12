@@ -491,7 +491,7 @@ class BufferedRenderer:
 
     def _depth(self, stop: threading.Event, p: PreviewParams, src: queue.Queue, out: queue.Queue) -> None:
         try:
-            self._engine = depthmod.shared_engine(p.force_cpu)
+            self._engine = p.engine()
             stab = depthmod.DepthStabilizer(float(np.clip(p.temporal / 100.0 * 0.95, 0.0, 0.95)))
             steady = None
             reuse_turn = False
@@ -510,7 +510,7 @@ class BufferedRenderer:
                     scale = 640.0 / max(h, w)
                     small = frame if scale >= 1.0 else cv2.resize(frame, (round(w * scale), round(h * scale)),
                                                                   interpolation=cv2.INTER_AREA)
-                    steady = stab(self._engine.infer(small), small)
+                    steady = stab.run(self._engine, small)
                 if not self._put(out, (index, frame, steady), stop):
                     break
         except Exception as error:  # noqa: BLE001

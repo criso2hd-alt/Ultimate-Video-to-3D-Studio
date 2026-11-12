@@ -63,6 +63,13 @@ licence:
   - Depth Anything V2 Small (the depth model shipped with the app): Apache
     License 2.0. The larger Base and Large models are CC-BY-NC-4.0 and are not
     included.
+  - Depth Anything 3 Mono-Large (the optional High quality depth model, downloaded
+    only if chosen): Apache License 2.0. The other Large, Giant and Nested Depth
+    Anything 3 models are CC-BY-NC-4.0 and are not used.
+  - NVIDIA TensorRT-RTX execution provider for ONNX Runtime (optional, downloaded
+    from pypi.org only if switched on): the plugin is Apache License 2.0; the
+    TensorRT-RTX runtime inside it is under NVIDIA's own licence. It is never
+    bundled with the application.
   - FFmpeg, through PyAV: downloaded at run time from PyPI, under its own
     (LGPL/GPL) terms.
   - Qt, through PySide6: LGPL.
@@ -71,10 +78,13 @@ licence:
   - ONNX Runtime, NumPy, OpenCV, Numba: their respective permissive licences.
 
 The application connects to the network only (1) to download the video component
-(FFmpeg via PyAV) from pypi.org the first time it is needed, and (2) to ask
-api.github.com, once at launch, whether a newer version has been published (this can
-be switched off in Settings; it only shows a notice and a link, and downloads and
-installs nothing). It has no telemetry.
+(FFmpeg via PyAV) from pypi.org the first time it is needed, (2) to download a depth
+model from this project's GitHub releases if it is missing, or if the person chooses
+the High quality model, (3) to download NVIDIA's TensorRT-RTX package from pypi.org if
+the person switches on NVIDIA acceleration, and (4) to ask api.github.com, once at
+launch, whether a newer version has been published (this can be switched off in
+Settings; it only shows a notice and a link, and downloads and installs nothing). It
+has no telemetry.
 
 
 NOTE ON FORKING

@@ -95,7 +95,7 @@ def test_full_conversion_with_audio_and_range(tmp_path, layout, monkeypatch):
             self.session = object()
             return "test"
 
-        def infer(self, rgb):
+        def infer(self, rgb, bars=None):
             return np.tile(np.linspace(0, 1, depthmod.INPUT, dtype=np.float32), (depthmod.INPUT, 1))
 
     monkeypatch.setattr(depthmod, "DepthEngine", _Ramp)
@@ -126,7 +126,7 @@ def test_can_stop_midway(tmp_path, monkeypatch):
             self.session = object()
             return "test"
 
-        def infer(self, rgb):
+        def infer(self, rgb, bars=None):
             return np.full((depthmod.INPUT, depthmod.INPUT), 0.5, np.float32)
 
     monkeypatch.setattr(pipeline.depthmod, "DepthEngine", _Ramp)

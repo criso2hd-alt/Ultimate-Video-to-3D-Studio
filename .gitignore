@@ -32,3 +32,6 @@ docs/room-template/*backup*.blend
 docs/room-template/Textures/
 room-build/
 release_next/
+
+# Depth Anything 3 trial (weights, a test venv and caches; kept off the C drive)
+da3_test/

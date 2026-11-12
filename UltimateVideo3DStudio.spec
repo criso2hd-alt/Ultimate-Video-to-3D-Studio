@@ -78,7 +78,7 @@ if IS_MAC:
         bundle_identifier="app.ultimatevideo3d.studio",
         info_plist={
             "CFBundleDisplayName": "Ultimate Video to 3D Studio",
-            "CFBundleShortVersionString": "0.2.1",
+            "CFBundleShortVersionString": "0.2.2",
             "NSHighResolutionCapable": True,
             "NSHumanReadableCopyright": "Free to use",
         },

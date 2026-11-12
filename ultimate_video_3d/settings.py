@@ -29,6 +29,9 @@ class ThreeDSettings:
     depth_blur: float = 0.0         # 0..100, softens depth to hide artefacts
     #: Depth cleanup: "standard" (the original), "smooth" or "smooth_high" (see depth.refine).
     depth_quality: str = "standard"
+    #: Depth model: "fast" (Depth Anything V2 Small, built in) or "quality" (Depth Anything 3 Mono-Large, downloaded
+    #: when first chosen). See depth.MODELS. Part of the 3D look, so it is in resume keys and preview cache keys.
+    depth_model: str = "fast"
 
     def params(self) -> stereo.StereoParams:
         return stereo.StereoParams(
@@ -98,6 +101,8 @@ class AppSettings:
     onboarding_version: int = 0
     #: Run the depth model on the CPU even when a GPU is available (troubleshooting).
     force_cpu_depth: bool = False
+    #: Use NVIDIA's TensorRT-RTX add-on for depth when it is downloaded (accel.py); DirectML otherwise.
+    nvidia_accel: bool = False
 
     def to_json(self) -> str:
         return json.dumps(asdict(self), indent=2)
@@ -153,6 +158,9 @@ class AppSettings:
         if isinstance(raw.get("vr_beam_level"), (int, float)) and not isinstance(raw.get("vr_beam_level"), bool):
             settings.vr_beam_level = min(2.0, max(0.25, float(raw["vr_beam_level"])))
         settings.force_cpu_depth = bool(raw.get("force_cpu_depth", False))
+        settings.nvidia_accel = raw.get("nvidia_accel") is True
+        if settings.threed.depth_model not in ("fast", "quality"):
+            settings.threed.depth_model = "fast"
         return settings
 
     def save(self, path: Path) -> None:

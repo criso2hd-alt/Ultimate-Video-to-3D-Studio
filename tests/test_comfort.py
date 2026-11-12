@@ -20,7 +20,7 @@ from ultimate_video_3d.settings import ThreeDSettings  # noqa: E402
 class FakeEngine:
     """Stands in for the depth model: a near block whose size grows with the frame's brightness, so each sample has its own strength."""
 
-    def infer(self, rgb):
+    def infer(self, rgb, bars=None):
         d = np.zeros(rgb.shape[:2], np.float32)
         level = float(rgb.mean())
         h, w = d.shape

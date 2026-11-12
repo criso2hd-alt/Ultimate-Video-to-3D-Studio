@@ -43,6 +43,7 @@ from .discdialog import DiscDialog
 from . import library as librarymod
 from . import zones as zonesmod
 from . import comfort as comfortmod
+from . import accel as accelmod
 from . import resume as resumemod
 from .folderdialog import FolderDialog
 from .librarypage import LibraryPage
@@ -198,7 +199,32 @@ class VideoDownloadWorker(QObject):
 
 
 class ModelDownloadWorker(QObject):
-    """Fetches the depth model from the project's GitHub release if the app does not have it."""
+    """Fetches depth model files from the project's GitHub release if the app does not have them."""
+
+    progress = Signal(object, object)
+    status = Signal(str)
+    finished = Signal()
+    failed = Signal(str)
+
+    def __init__(self, names: list[str] | None = None) -> None:
+        super().__init__()
+        self._names = list(names or [models.NAME])
+
+    def fresh(self) -> "ModelDownloadWorker":
+        return ModelDownloadWorker(self._names)
+
+    def run(self) -> None:
+        try:
+            for name in self._names:
+                models.install(on_bytes=lambda d, t: self.progress.emit(d, t), on_text=self.status.emit, name=name)
+        except Exception as error:  # noqa: BLE001 - surfaced in the UI
+            self.failed.emit(str(error))
+            return
+        self.finished.emit()
+
+
+class AccelDownloadWorker(QObject):
+    """Fetches NVIDIA's TensorRT-RTX plugin (accel.py) and checks that it starts on this card."""
 
     progress = Signal(object, object)
     status = Signal(str)
@@ -207,7 +233,11 @@ class ModelDownloadWorker(QObject):
 
     def run(self) -> None:
         try:
-            models.install(on_bytes=lambda d, t: self.progress.emit(d, t), on_text=self.status.emit)
+            accelmod.install(on_bytes=lambda d, t: self.progress.emit(d, t), on_text=self.status.emit)
+            self.status.emit("Checking that it starts on your card…")
+            if not accelmod.register():
+                raise OSError("NVIDIA TensorRT-RTX was downloaded but does not start on this graphics card or driver "
+                              "(it needs a GeForce RTX card and a recent NVIDIA driver). The app keeps using DirectML.")
         except Exception as error:  # noqa: BLE001 - surfaced in the UI
             self.failed.emit(str(error))
             return
@@ -221,9 +251,10 @@ class FitScan(QObject):
     finished = Signal(object)
     failed = Signal(str)
 
-    def __init__(self, path, threed, start_ms: float, end_ms: float | None, parent=None) -> None:
+    def __init__(self, path, threed, start_ms: float, end_ms: float | None, parent=None, nvidia: bool = False) -> None:
         super().__init__(parent)
         self._args = (path, threed, start_ms, end_ms)
+        self._nvidia = nvidia
         self._stop = threading.Event()
 
     def start(self) -> None:
@@ -235,7 +266,8 @@ class FitScan(QObject):
     def _run(self) -> None:
         try:
             path, threed, start_ms, end_ms = self._args
-            result = comfortmod.scan(path, threed, start_ms, end_ms, progress=self.progress.emit, should_stop=self._stop.is_set)
+            result = comfortmod.scan(path, threed, start_ms, end_ms, progress=self.progress.emit, should_stop=self._stop.is_set,
+                                     nvidia=self._nvidia)
             self.finished.emit(result)
         except Exception as error:  # noqa: BLE001 - reported in the panel, never allowed to take the app down
             self.failed.emit(f"{type(error).__name__}: {error}")
@@ -649,6 +681,17 @@ class SettingsPage(QWidget):
         cards.append(look)
 
         perf = ModuleCard("Performance")
+        self.nvidia_box = QCheckBox("Use NVIDIA RTX acceleration for depth (TensorRT)")
+        self.nvidia_box.setChecked(settings.nvidia_accel)
+        self.nvidia_box.setToolTip(
+            "For GeForce RTX cards: runs the depth model through NVIDIA TensorRT instead of DirectML - about 2x faster "
+            "for Fast and 5x for High quality. A one-time download of about 110 MB (NVIDIA's own package). If it cannot "
+            "start on your card or driver, depth simply runs on DirectML as before.")
+        perf.add(self.nvidia_box)
+        self.nvidia_note = QLabel("")
+        self.nvidia_note.setObjectName("hint")
+        self.nvidia_note.setWordWrap(True)
+        perf.add(self.nvidia_note)
         self.cpu_depth = QCheckBox("Run depth on the CPU (slow; for troubleshooting)")
         self.cpu_depth.setChecked(settings.force_cpu_depth)
         perf.add(self.cpu_depth)
@@ -1080,6 +1123,7 @@ class MainWindow(QMainWindow):
             temporal=s.threed.temporal, edge_aware=s.threed.edge_aware, depth_blur=s.threed.depth_blur,
             depth_mode=s.threed.depth_quality,
             colour=s.colour.copy(), force_cpu=s.force_cpu_depth,
+            depth_model=s.threed.depth_model, nvidia=s.nvidia_accel,
         )
         self.player.set_buffer_config(self._params if self._params.needs_depth else None, s.preview_buffer)
 
@@ -1207,6 +1251,7 @@ class MainWindow(QMainWindow):
         page.lut.changed.connect(self._params_changed)
         page.export.changed.connect(self._export_changed)
         page.threed.fit_requested.connect(self._fit_strength)
+        page.threed.model_requested.connect(self._depth_model_requested)
         page.export.range_box.currentIndexChanged.connect(self._range_mode)
         page.export.set_rate_context(self._rate_context)
         page.timeline.in_changed.connect(lambda _f: page.export.refresh_rates())
@@ -1217,6 +1262,7 @@ class MainWindow(QMainWindow):
         sp = self.settings_page
         sp.theme_box.currentTextChanged.connect(self._theme_changed)
         sp.cpu_depth.toggled.connect(self._cpu_depth)
+        sp.nvidia_box.toggled.connect(self._nvidia_toggled)
         sp.preview_box.currentIndexChanged.connect(self._preview_height_changed)
         sp.buffer_box.currentIndexChanged.connect(self._buffer_changed)
         sp.fps_box.currentIndexChanged.connect(self._fps_changed)
@@ -1278,7 +1324,8 @@ class MainWindow(QMainWindow):
             fps = page.info.fps or 24.0
             start_ms, end_ms = first / fps * 1000.0, (last + 1) / fps * 1000.0
         self._fit_limit = limit
-        self._fit = FitScan(page.source, copy.deepcopy(self.settings.threed), start_ms, end_ms, self)
+        self._fit = FitScan(page.source, copy.deepcopy(self.settings.threed), start_ms, end_ms, self,
+                            nvidia=self.settings.nvidia_accel)
         self._fit.progress.connect(lambda f: page.threed.set_fit_state(True, f"Looking through the film... {f * 100:.0f}% (press Stop to cancel)"))
         self._fit.finished.connect(self._fit_done)
         self._fit.failed.connect(self._fit_failed)
@@ -1580,11 +1627,93 @@ class MainWindow(QMainWindow):
         self._submit(new_frame=True)
         self._save_timer.start()
 
+    # -- depth model and NVIDIA acceleration --------------------------------
+
+    def _warm(self) -> None:
+        """Load the chosen depth model in the background (it then stays resident)."""
+        s = self.settings
+        warmup.start(s.force_cpu_depth, s.threed.depth_model, s.nvidia_accel)
+
+    def _depth_model_requested(self, key: str) -> None:
+        """The 3D panel's Depth model box. The High quality model is downloaded the first time (asked first)."""
+        s = self.settings
+        if key == s.threed.depth_model:
+            return
+        missing = depthmod.missing_files(key, s.nvidia_accel and accelmod.is_installed())
+        if missing:
+            size = sum(models.size_of(n) for n in missing) / 1e9
+            answer = QMessageBox.question(
+                self, "Download the High quality depth model?",
+                f"High quality uses Depth Anything 3 (Mono-Large, Apache-2.0). It is a one-time download of about "
+                f"{size:.1f} GB from this project's GitHub page, kept in the models folder next to the app.\n\n"
+                "Download it now?")
+            if answer != QMessageBox.StandardButton.Yes:
+                self.video_page.threed.set_depth_model(s.threed.depth_model)
+                return
+            self._run_download("Downloading the High quality depth model",
+                               f"Depth Anything 3 Mono-Large, about {size:.1f} GB, once.",
+                               ModelDownloadWorker(missing), lambda: self._use_depth_model(key),
+                               "Could not download the depth model",
+                               on_fail=lambda: self.video_page.threed.set_depth_model(s.threed.depth_model))
+            return
+        self._use_depth_model(key)
+
+    def _use_depth_model(self, key: str) -> None:
+        self.settings.threed.depth_model = key
+        self.video_page.threed.set_depth_model(key)
+        self._warm()                                       # load it now, in the background, not on the next frame
+        self._params_changed()
+        self._save_timer.start()
+
+    def _nvidia_toggled(self, on: bool) -> None:
+        if on and not accelmod.is_installed():
+            self._run_download("Adding NVIDIA RTX acceleration",
+                               "NVIDIA's TensorRT-RTX package for ONNX Runtime (about 110 MB), once, from PyPI.",
+                               AccelDownloadWorker(), lambda: self._nvidia_ready(True), "Could not add NVIDIA acceleration",
+                               on_fail=lambda: self._nvidia_ready(False))
+            return
+        self._nvidia_ready(on)
+
+    def _nvidia_ready(self, on: bool) -> None:
+        s = self.settings
+        s.nvidia_accel = on
+        sp = self.settings_page
+        sp.nvidia_box.blockSignals(True)
+        sp.nvidia_box.setChecked(on)
+        sp.nvidia_box.blockSignals(False)
+        self._update_nvidia_note()
+        missing = depthmod.missing_files(s.threed.depth_model, on)
+        if on and missing:
+            # High quality on NVIDIA wants its own (half-size) file; until it is here the DirectML one keeps working.
+            size = sum(models.size_of(n) for n in missing) / 1e9
+            self._run_download("Downloading the NVIDIA version of the depth model",
+                               f"Depth Anything 3 for TensorRT, about {size:.1f} GB, once.",
+                               ModelDownloadWorker(missing), self._nvidia_model_arrived, "Could not download the depth model")
+        self._warm()
+        self._params_changed()
+        self._save_timer.start()
+
+    def _nvidia_model_arrived(self) -> None:
+        depthmod.forget_shared()                           # it was loaded from the DirectML file: load the new one
+        self._warm()
+        self._params_changed()
+
+    def _update_nvidia_note(self) -> None:
+        sp = self.settings_page
+        nvidia = accelmod.has_nvidia(self.gpus)
+        sp.nvidia_box.setEnabled(nvidia or self.settings.nvidia_accel)
+        if not nvidia:
+            sp.nvidia_note.setText("Needs an NVIDIA GeForce RTX graphics card.")
+        elif self.settings.nvidia_accel:
+            sp.nvidia_note.setText(accelmod.status())
+        else:
+            sp.nvidia_note.setText("Off: depth runs on DirectML, which works on every card.")
+
     # -- first-run setup ---------------------------------------------------
 
     def _start_initial_setup(self) -> None:
         resumemod.cleanup_stale()                        # paused conversions nobody came back to
-        warmup.start(self.settings.force_cpu_depth)      # kernels and the depth model, once per launch
+        self._warm()                                     # kernels and the depth model, once per launch
         self.gpus = sysinfo.detect_gpus()
         primary = sysinfo.primary_gpu(self.gpus)
         self.gauge.set_gpu_name(primary.short_name if primary else "No GPU")
@@ -1593,6 +1722,7 @@ class MainWindow(QMainWindow):
         self._gauge_timer.timeout.connect(lambda: self.gauge.update_load(self._monitor.read()))
         self._gauge_timer.start(1200)
         self._describe_hardware()
+        self._update_nvidia_note()
 
         if self.settings.check_updates:
             QTimer.singleShot(3000, self._check_updates)       # after the window is up; never blocks start-up
@@ -1610,7 +1740,7 @@ class MainWindow(QMainWindow):
         self._after_depth_model()
 
     def _depth_model_arrived(self) -> None:
-        warmup.start(self.settings.force_cpu_depth)      # the launch-time warm-up found nothing to load: do it now
+        self._warm()                                     # the launch-time warm-up found nothing to load: do it now
         self._after_depth_model()
 
     def _after_depth_model(self) -> None:
@@ -2228,11 +2358,15 @@ class MainWindow(QMainWindow):
                            "GitHub page. It is kept in the models folder next to the app.",
                            ModelDownloadWorker(), then, "Could not download the depth model")
 
-    def _run_download(self, title: str, subtitle: str, worker, then, failed_title: str) -> None:
+    def _run_download(self, title: str, subtitle: str, worker, then, failed_title: str, on_fail=None) -> None:
         if self._dl_thread is not None:
+            if on_fail is not None:
+                on_fail()                                  # one download at a time: this one is not happening
             return
         self._dl_after = then
-        self._dl_retry = lambda: self._run_download(title, subtitle, type(worker)(), then, failed_title)
+        self._dl_on_fail = on_fail
+        fresh = getattr(worker, "fresh", lambda: type(worker)())
+        self._dl_retry = lambda: self._run_download(title, subtitle, fresh(), then, failed_title, on_fail)
         self._dl_failed_title = failed_title
         dialog = DownloadDialog(title, subtitle, self)
         dialog.setStyleSheet(style_for(self.settings.theme))
@@ -2270,8 +2404,11 @@ class MainWindow(QMainWindow):
         again = box.addButton("Try again", QMessageBox.ButtonRole.AcceptRole)
         box.addButton("Close", QMessageBox.ButtonRole.RejectRole)
         box.exec()
+        on_fail, self._dl_on_fail = getattr(self, "_dl_on_fail", None), None
         if box.clickedButton() is again and retry is not None:
             retry()
+        elif on_fail is not None:
+            on_fail()
 
     # -- shutdown ----------------------------------------------------------
 

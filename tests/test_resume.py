@@ -26,7 +26,7 @@ def rig(tmp_path, monkeypatch):
             self.session = object()
             return "test"
 
-        def infer(self, rgb):
+        def infer(self, rgb, bars=None):
             return np.full((depthmod.INPUT, depthmod.INPUT), 0.5, np.float32)
 
     monkeypatch.setattr(pipeline.depthmod, "DepthEngine", _Flat)

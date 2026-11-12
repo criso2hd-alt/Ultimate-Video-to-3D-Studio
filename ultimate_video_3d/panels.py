@@ -322,6 +322,9 @@ class ThreeDPanel(ModuleCard):
 
     changed = Signal()
     fit_requested = Signal(float)           # look through the whole film and set the strength so its strongest moment sits at this % of the width
+    #: The person picked a depth model ("fast" / "quality"). The window decides: it may need a download first, and calls
+    #: ``set_depth_model`` with what is really in use (so a cancelled download puts the box back).
+    model_requested = Signal(str)
 
     def __init__(self, s: ThreeDSettings, parent: QWidget | None = None) -> None:
         super().__init__("3D conversion", "AI depth", checkable=True, parent=parent)
@@ -340,6 +343,18 @@ class ThreeDPanel(ModuleCard):
         self.layout_note.setWordWrap(True)
         self.add(self.layout_note)
         self._layout()
+
+        self.model_box = QComboBox()
+        self.model_box.addItem("Fast", "fast")
+        self.model_box.addItem("High quality", "quality")
+        self.model_box.setToolTip(
+            "The AI that works out depth.\n\nFast: Depth Anything V2 Small, built in. Quick enough for smooth previews on "
+            "any graphics card.\n\nHigh quality: Depth Anything 3 Mono-Large. Keeps people and objects on clearer layers "
+            "and holds distance better (landscapes, rooms). A one-time download of about 1.3 GB; slower on most cards "
+            "(conversions only a little), fast with the NVIDIA add-on in Settings > Performance.")
+        self.model_box.currentIndexChanged.connect(lambda: self.model_requested.emit(self.model_box.currentData()))
+        self.add_layout(_row("Depth model", self.model_box))
+        self.set_depth_model(s.depth_model)
 
         self.gauge = DepthGauge()
         self.add(self.gauge)
@@ -422,6 +437,12 @@ class ThreeDPanel(ModuleCard):
         for widget in self._adv_widgets:
             self.add(widget)
             widget.setVisible(False)
+
+    def set_depth_model(self, key: str) -> None:
+        """Show ``key`` as the model in use, without asking for it again."""
+        self.model_box.blockSignals(True)
+        self.model_box.setCurrentIndex(max(0, self.model_box.findData(key)))
+        self.model_box.blockSignals(False)
 
     def set_fit_state(self, running: bool, text: str = "") -> None:
         """Show a film-wide scan's progress or result under the buttons; while it runs either button stops it."""

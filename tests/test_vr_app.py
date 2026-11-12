@@ -392,3 +392,59 @@ def test_the_gauge_is_updated_from_the_playing_frames_a_few_times_a_second(win):
     win._on_buffered_image(([picture], "", False, 1.0, None, zones_now))      # inside the same 150 ms: not again
     assert len(seen) == 1 and seen[0].out_pct == pytest.approx(1.7)
     win._on_buffered_image(([picture], "", False, 1.0, None))                  # an older 5-part payload still works
+
+
+def test_choosing_high_quality_asks_before_the_download_and_declining_keeps_fast(win, monkeypatch):
+    asked = []
+    monkeypatch.setattr(appmod.depthmod, "missing_files", lambda model, nvidia=False: ["Depth-Anything-3-Mono-Large.onnx"])
+    monkeypatch.setattr(QMessageBox, "question", lambda *a, **k: asked.append(a[2]) or QMessageBox.StandardButton.No)
+    box = win.video_page.threed.model_box
+    box.setCurrentIndex(box.findData("quality"))
+    assert asked and "1.3 GB" in asked[0]                                       # says how big, before anything happens
+    assert win.settings.threed.depth_model == "fast" and box.currentData() == "fast"
+    assert win._dl_thread is None
+
+
+def test_choosing_an_installed_model_switches_the_preview_and_loads_it_in_the_background(win, monkeypatch):
+    warmed = []
+    monkeypatch.setattr(appmod.depthmod, "missing_files", lambda model, nvidia=False: [])
+    monkeypatch.setattr(appmod.warmup, "start", lambda *a: warmed.append(a))
+    box = win.video_page.threed.model_box
+    box.setCurrentIndex(box.findData("quality"))
+    assert win.settings.threed.depth_model == "quality" and win._params.depth_model == "quality"
+    assert warmed and warmed[-1][1] == "quality"
+    box.setCurrentIndex(box.findData("fast"))
+    assert win.settings.threed.depth_model == "fast" and win._params.depth_model == "fast"
+
+
+def test_the_nvidia_switch_uses_the_add_on_when_it_is_there(win, monkeypatch):
+    monkeypatch.setattr(appmod.accelmod, "is_installed", lambda: True)
+    monkeypatch.setattr(appmod.accelmod, "status", lambda: "Ready.")
+    monkeypatch.setattr(appmod.accelmod, "has_nvidia", lambda gpus: True)
+    monkeypatch.setattr(appmod.depthmod, "missing_files", lambda model, nvidia=False: [])
+    monkeypatch.setattr(appmod.warmup, "start", lambda *a: None)
+    sp = win.settings_page
+    sp.nvidia_box.setChecked(True)
+    assert win.settings.nvidia_accel and win._params.nvidia and sp.nvidia_note.text() == "Ready."
+    sp.nvidia_box.setChecked(False)
+    assert not win.settings.nvidia_accel and not win._params.nvidia
+
+
+def test_without_an_nvidia_card_the_switch_says_why_it_is_off(win, monkeypatch):
+    monkeypatch.setattr(appmod.accelmod, "has_nvidia", lambda gpus: False)
+    win._update_nvidia_note()
+    assert not win.settings_page.nvidia_box.isEnabled() and "NVIDIA" in win.settings_page.nvidia_note.text()
+
+
+def test_a_failed_add_on_download_leaves_the_switch_off(win, monkeypatch):
+    monkeypatch.setattr(appmod.accelmod, "is_installed", lambda: False)
+    monkeypatch.setattr(appmod.accelmod, "has_nvidia", lambda gpus: True)
+    monkeypatch.setattr(appmod.warmup, "start", lambda *a: None)
+
+    def fake_download(title, subtitle, worker, then, failed_title, on_fail=None):
+        assert isinstance(worker, appmod.AccelDownloadWorker)
+        on_fail()
+
+    monkeypatch.setattr(win, "_run_download", fake_download)
+    win.settings_page.nvidia_box.setChecked(True)
+    assert not win.settings.nvidia_accel and not win.settings_page.nvidia_box.isChecked()

@@ -63,16 +63,28 @@ def run_selftest() -> int:
     try:
         from . import depth
 
-        engine = depth.DepthEngine()
-        line(f"model: {depth.locate()}")
-        line(f"running on: {engine.load()}")
+        from . import accel
+
         frame = np.random.default_rng(0).random((720, 1280, 3), dtype=np.float32)
-        engine.infer(frame)
-        began = time.perf_counter()
         runs = 10
-        for _ in range(runs):
-            raw = engine.infer(frame)
-        line(f"depth model: {(time.perf_counter() - began) / runs * 1000:.1f} ms / frame")
+        line(f"NVIDIA TensorRT-RTX add-on: {accel.status()}")
+        for key in depth.MODELS:
+            for nvidia in ((False, True) if accel.is_installed() else (False,)):
+                if not depth.is_installed(key, nvidia):
+                    line(f"{depth.MODELS[key].label}: not downloaded" + (" (NVIDIA file)" if nvidia else ""))
+                    continue
+                engine = depth.DepthEngine(key)
+                device = engine.load(None, False, nvidia)
+                engine.infer(frame)
+                began = time.perf_counter()
+                for _ in range(runs):
+                    raw = engine.infer(frame)
+                line(f"{depth.MODELS[key].label} on {device}: {(time.perf_counter() - began) / runs * 1000:.1f} ms / frame"
+                     f"  ({depth.locate(False, key, nvidia).name})")
+                engine.session = None
+        engine = depth.DepthEngine()
+        engine.load()
+        raw = engine.infer(frame)
         steady = depth.DepthStabilizer(0.5)(raw, frame)
         refined = depth.refine(steady, frame)
         stereo.synthesize(frame, refined, stereo.StereoParams())

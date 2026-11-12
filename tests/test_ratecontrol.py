@@ -129,7 +129,7 @@ def test_converting_to_a_file_size_lands_near_that_size_and_a_quality_encode_doe
             self.session = object()
             return "test"
 
-        def infer(self, rgb):
+        def infer(self, rgb, bars=None):
             return np.full((depthmod.INPUT, depthmod.INPUT), 0.5, np.float32)
 
     monkeypatch.setattr(pipeline.depthmod, "DepthEngine", _Flat)

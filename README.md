@@ -8,7 +8,7 @@
 
 Side-by-Side · Top-and-Bottom · Anaglyph · Colour + Depth, for VR headsets, 3D TVs, projectors and red/cyan glasses.
 
-[![Download](https://img.shields.io/badge/⬇%20Download-Windows%20v0.2.1-2ea44f.svg)](https://github.com/criso2hd-alt/Ultimate-Video-to-3D-Studio/releases/latest)
+[![Download](https://img.shields.io/badge/⬇%20Download-Windows%20v0.2.2-2ea44f.svg)](https://github.com/criso2hd-alt/Ultimate-Video-to-3D-Studio/releases/latest)
 [![Discord](https://img.shields.io/badge/Discord-join%20the%20community-5865F2.svg?logo=discord&logoColor=white)](https://discord.gg/mEfSW3XfNn)
 [![Platform](https://img.shields.io/badge/Windows-11-0078D4.svg)](#download)
 [![Any GPU](https://img.shields.io/badge/GPU-NVIDIA%20·%20AMD%20·%20Intel-76b900.svg)](#how-it-works)
@@ -61,6 +61,9 @@ Real screenshots of the app, taken at **2560 × 1440**. The footage is a scene g
 
 ## What's new in 0.2
 
+- **High quality depth (0.2.2).** Pick *High quality* under Depth model in the 3D panel to use Depth Anything 3 Mono-Large
+  (a one-time 1.3 GB download): clearer layers and better distance. *Fast* (the built-in model) stays the default.
+- **NVIDIA RTX acceleration (0.2.2)**, optional, in Settings > Performance: depth about 2x to 5x faster on GeForce RTX cards.
 - **Watch in VR.** Put on a headset and watch your converted videos in a baked virtual home theatre (a cinema-style screen,
   seats you can move between, lights that dim while the film plays, a projector beam). A menu in the headset has a timeline,
   skip buttons, volume, lights, seats and rooms. Start it with the **Start VR** button in the Library. Black bars burned into
@@ -74,9 +77,14 @@ Real screenshots of the app, taken at **2560 × 1440**. The footage is a scene g
 
 ## What it does
 
-- **2D → 3D with real depth.** Depth Anything V2, made steady over time (no
-  pumping or shimmer), edge-aligned to the picture (no halos), and rendered with a
-  z-buffered forward warp that fills gaps from the *background* side.
+- **2D → 3D with real depth.** Two depth models: **Fast** (Depth Anything V2 Small, built in) and
+  **High quality** (Depth Anything 3 Mono-Large, a one-time 1.3 GB download when you pick it: people and
+  objects sit on clearer layers and distance holds better). Made steady over time (no pumping or shimmer),
+  edge-aligned to the picture (no halos), black bars burned into wide films are left out of the depth, and
+  rendered with a z-buffered forward warp that fills gaps from the *background* side.
+- **Runs on any GPU through DirectML.** Optional **NVIDIA RTX acceleration** (Settings > Performance): a
+  ~110 MB download of NVIDIA TensorRT-RTX that makes depth about 2x (Fast) to 5x (High quality) faster on
+  GeForce RTX cards. No CUDA install; if it cannot start, DirectML carries on.
 - **Outputs:** Side-by-Side (half / full), Top-and-Bottom (half / full), red-cyan
   Anaglyph, Colour + Depth (2D+Z), or a depth-map video.
 - **Live preview on a small proxy (540p by default, up to 720p),** running the same
@@ -166,7 +174,9 @@ timings — paste it into a bug report.
 The video component (FFmpeg via PyAV, ~35 MB) is downloaded the first time it is
 needed, not bundled. The depth model (Apache-2.0 Depth Anything V2 Small, fp16,
 50 MB) ships in the release zip; if it is ever missing, the app downloads it from this
-repository's `models-v1` release by itself.
+repository's `models-v1` release by itself. The optional High quality model (Apache-2.0
+Depth Anything 3 Mono-Large, exported by `scripts/export_da3.py`) comes from the same release
+when it is first chosen: 1.3 GB (fp32, DirectML), or 0.7 GB (fp16) with NVIDIA acceleration on.
 
 ## Updates
 
@@ -228,5 +238,6 @@ repository instead.
 
 Third-party components keep their own licences (the bundled Depth Anything V2
 Small model is Apache-2.0; the larger Base/Large models are CC-BY-NC and are
-not included; the bundled IBM Plex and Archivo fonts are under the SIL Open Font
+not included; the optional Depth Anything 3 Mono-Large model is Apache-2.0; the
+optional NVIDIA TensorRT-RTX package is fetched from PyPI under NVIDIA's terms; the bundled IBM Plex and Archivo fonts are under the SIL Open Font
 License 1.1, in `ultimate_video_3d/assets/fonts/OFL.txt`).

@@ -376,9 +376,9 @@ def test_version_is_the_same_everywhere():
     import ultimate_video_3d
 
     root = Path(__file__).resolve().parent.parent
-    assert ultimate_video_3d.__version__ == "0.2.1"
-    assert re.search(r'^version = "0\.2\.1"', (root / "pyproject.toml").read_text(encoding="utf-8"), re.M)
-    assert 'CFBundleShortVersionString": "0.2.1"' in (root / "UltimateVideo3DStudio.spec").read_text(encoding="utf-8")
+    assert ultimate_video_3d.__version__ == "0.2.2"
+    assert re.search(r'^version = "0\.2\.2"', (root / "pyproject.toml").read_text(encoding="utf-8"), re.M)
+    assert 'CFBundleShortVersionString": "0.2.2"' in (root / "UltimateVideo3DStudio.spec").read_text(encoding="utf-8")
 
 
 # --- automatic frame-rate tuning ---------------------------------------------

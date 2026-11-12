@@ -265,7 +265,7 @@ def test_converting_a_ripped_title_keeps_the_chosen_audio_and_subtitle_in_an_mkv
             self.session = object()
             return "test"
 
-        def infer(self, rgb):
+        def infer(self, rgb, bars=None):
             return np.full((depthmod.INPUT, depthmod.INPUT), 0.5, np.float32)
 
     monkeypatch.setattr(pipeline.depthmod, "DepthEngine", _Flat)

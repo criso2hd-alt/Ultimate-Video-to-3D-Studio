@@ -20,7 +20,9 @@ decode, the GPU depth model, the CPU warp and the encoder overlap. See
 ## Non-negotiable constraints
 
 - **Every GPU on PC, and a clean path to macOS.** No CUDA dependency, ever.
-  Depth = ONNX Runtime (DirectML on Windows, CoreML on Mac, CPU fallback).
+  Depth = ONNX Runtime (DirectML on Windows, CoreML on Mac, CPU fallback). The one
+  exception is *optional*: NVIDIA's TensorRT-RTX plugin (`accel.py`), downloaded only if
+  the person switches it on, with DirectML as the automatic fallback.
   Warp/grade/tonemap = Numba kernels (CPU, all cores). Encoders = the fixed
   function ones in every driver (NVENC / AMF / QSV / VideoToolbox), software as
   the floor. Anything Windows-only (`ctypes.windll`, DXGI, PDH) lives behind a
@@ -505,3 +507,39 @@ Fine hair against a dark background still shows a few small speckles: the depth 
 ## Planned for 0.2: macOS
 
 macOS is written but untested (0.2 will test it on an Apple Silicon MacBook Pro).
+
+## Depth Anything 3 and NVIDIA acceleration (0.2.2)
+
+**Two depth models** (`depth.MODELS`, the 3D panel's *Depth model* box, `ThreeDSettings.depth_model`): `fast` = V2 Small (built in,
+the default) and `quality` = **Depth Anything 3 Mono-Large** (Apache-2.0; downloaded from the `models-v1` release the first time it
+is picked, asked first). Only Mono-Large is worth it: DA3-Small/Base are multi-view models and pulled background people forward;
+DA3 Large/Giant/Nested are CC BY-NC. Tested with the owner on Cloudy and Walter Mitty (stills + 20 s SBS clips in the headset):
+clearer layers, distance kept. Export: `scripts/export_da3.py` (cartesian_prod -> meshgrid, exporter imports stubbed), fixed
+280 x 504 input (half the tokens of a 504 square).
+- DA3 predicts **depth**, not V2's disparity-like output. Plain 1/depth makes the nearest object take the whole range and flattens
+  everything behind it; linear depth swells the distance; **log depth** (`depth._from_depth`) was best. Sky (second output) goes to
+  the far end of what is not sky, as DA3's own post-processing does.
+- **fp16 vs fp32 is backwards between the two GPU paths**: DirectML runs the DA3 fp16 export at 250 ms (fp32: 43 ms), TensorRT-RTX
+  runs fp16 at 7.5 ms (fp32: 26 ms). So two files: `.onnx` (fp32, DirectML/CPU, 1.3 GB) and `.fp16.onnx` (NVIDIA, 0.7 GB);
+  `depth.locate(cpu, model, nvidia)` / `missing_files` pick per path. Use ORT's own fp16 converter
+  (`onnxruntime.transformers.float16`); onnxconverter-common's breaks the Cast nodes.
+- One resident engine for everything (`depth.shared_engine(force_cpu, progress, model, nvidia)`, keyed by `engine_key`), and
+  conversions now use it too instead of making their own (no second 1.3 GB copy, no reload). `forget_shared()` drops it when a
+  better file arrives. `PreviewParams.depth_model` / `.nvidia` make a different preview cache look per model.
+
+**NVIDIA RTX acceleration** (`accel.py`, Settings > Performance, `settings.nvidia_accel`): NVIDIA's TensorRT-RTX **plugin**
+execution provider (`onnxruntime-ep-nv-tensorrt-rtx-cu13`/`-cu12` 0.5.0 from PyPI, ~110 MB, cu12 for drivers older than R580)
+is unpacked into `data/nvidia-trt-rtx/` and registered into the **same onnxruntime-directml 1.24.4** the app ships
+(`ort.register_execution_provider_library`, then `SessionOptions.add_provider_for_devices`). Checked on an RTX 4080: V2 18 -> ~4 ms,
+DA3 43 -> ~10 ms per frame including the app's own pre/post-processing; outputs within 0.5% of DirectML. Rejected: the plain CUDA
+EP (`onnxruntime-gpu`: a 2 GB download and a *different* onnxruntime package that cannot sit beside the DirectML one; DA3 16 ms).
+TensorRT-RTX builds kernels on first load (~15 s for DA3, cached in `data/nvidia-trt-rtx/cache`, later loads a few seconds): the
+launch warm-up hides it. `depth._providers(nvidia)` puts it first and DirectML after, so a card or driver it cannot use just runs
+as before; the plugin's DLLs are never bundled (NVIDIA licence for the runtime).
+
+**Black bars burned into the picture** (`depth.find_bars`, `DepthStabilizer.bars/run`, `DepthEngine.infer(rgb, bars)`): before, a
+2.39:1 film in a 16:9 frame fed its bars to the model, which read them as the nearest thing (V2) or random depth (DA3) and they
+took the stabiliser's percentile range, flattening the real picture. Now only the picture goes through the network and the bars
+get the far value (2nd percentile, inside the picture's range). Per stream: smaller bars are believed at once (never cut picture),
+bigger ones after `BAR_SETTLE` frames (a dark scene is not a bar); kept across scene cuts. Applies to both models. Every caller
+uses `stabilizer.run(engine, frame)`; test stand-ins take `infer(self, rgb, bars=None)`.

@@ -198,31 +198,30 @@ class _DepthStage(threading.Thread):
         eye_w, eye_h = self._eye
         engine = stabilizer = None
         if threed.enabled:
-            engine = depthmod.DepthEngine()
-            self._say(f"Depth model: {engine.load(self._say, self._settings.force_cpu_depth)}")
+            # The shared, resident engine (the one the preview uses): no second copy of a 1.3 GB model on the GPU,
+            # and no reload - DA3 with TensorRT-RTX takes seconds to load.
+            engine = depthmod.shared_engine(self._settings.force_cpu_depth, self._say, threed.depth_model,
+                                            self._settings.nvidia_accel)
+            self._say(f"Depth model: {engine.model.label} on {engine.device}")
             stabilizer = depthmod.DepthStabilizer(threed.temporal / 100.0 * 0.95)
-        try:
-            while not self.stop.is_set():
-                item = self._in.get()
-                if item is None or isinstance(item, Exception):
-                    self._put(item)
-                    return
-                _, frame = item
-                if self._signal == video.SDR and self._src_transfer != video.SDR:
-                    frame = hdr.tonemap_to_sdr(frame, self._src_transfer)
-                if frame.shape[1] != eye_w or frame.shape[0] != eye_h:
-                    frame = cv2.resize(frame, (eye_w, eye_h), interpolation=cv2.INTER_AREA)
-                d = None
-                if engine is not None:
-                    small = _shrink(frame, _DEPTH_EDGE)
-                    if self._signal != video.SDR:
-                        small = hdr.tonemap_to_sdr(small, self._signal)   # depth is judged on an ordinary picture
-                    d = stabilizer(engine.infer(small), small)
-                if not self._put((frame, d)):
-                    return
-        finally:
+        while not self.stop.is_set():
+            item = self._in.get()
+            if item is None or isinstance(item, Exception):
+                self._put(item)
+                return
+            _, frame = item
+            if self._signal == video.SDR and self._src_transfer != video.SDR:
+                frame = hdr.tonemap_to_sdr(frame, self._src_transfer)
+            if frame.shape[1] != eye_w or frame.shape[0] != eye_h:
+                frame = cv2.resize(frame, (eye_w, eye_h), interpolation=cv2.INTER_AREA)
+            d = None
             if engine is not None:
-                engine.session = None
+                small = _shrink(frame, _DEPTH_EDGE)
+                if self._signal != video.SDR:
+                    small = hdr.tonemap_to_sdr(small, self._signal)   # depth is judged on an ordinary picture
+                d = stabilizer.run(engine, small)
+            if not self._put((frame, d)):
+                return
 
 
 def convert_video(

@@ -17,3 +17,12 @@ def _vr_diary_in_a_temp_folder(monkeypatch):
     from ultimate_video_3d.vr import log
 
     monkeypatch.setattr(log, "_path", lambda: Path(tempfile.gettempdir()) / "uv3d-test-vr.log")
+
+
+@pytest.fixture(autouse=True)
+def _fresh_shared_depth_engine(monkeypatch):
+    """Conversions use the one resident depth engine (``depth.shared_engine``); each test gets its own, so a stand-in
+    a test patches in is what that test really runs (not an engine some earlier test left loaded)."""
+    from ultimate_video_3d import depth
+
+    monkeypatch.setattr(depth, "_shared", None)

@@ -18,16 +18,18 @@ import threading
 import numpy as np
 
 
-def _run(force_cpu: bool = False) -> None:
+def _run(force_cpu: bool = False, model: str = "fast", nvidia: bool = False) -> None:
     _warm_kernels()
-    _warm_model(force_cpu)
+    _warm_model(force_cpu, model, nvidia)
 
 
-def _warm_model(force_cpu: bool) -> None:
+def _warm_model(force_cpu: bool, model: str = "fast", nvidia: bool = False) -> None:
     try:
         from . import depth
 
-        engine = depth.shared_engine(force_cpu)
+        if not depth.is_installed(model, False):
+            model = depth.FAST                          # the High quality model is not downloaded (yet): warm the fast one
+        engine = depth.shared_engine(force_cpu, None, model, nvidia)
         engine.infer(np.zeros((64, 64, 3), np.float32))       # the first real call is slower than the rest
     except Exception:  # noqa: BLE001 - a missing model is reported when 3D is first used, not at launch
         pass
@@ -60,7 +62,7 @@ def _warm_kernels() -> None:
         pass
 
 
-def start(force_cpu: bool = False) -> threading.Thread:
-    thread = threading.Thread(target=_run, args=(force_cpu,), daemon=True, name="uv3d-warmup")
+def start(force_cpu: bool = False, model: str = "fast", nvidia: bool = False) -> threading.Thread:
+    thread = threading.Thread(target=_run, args=(force_cpu, model, nvidia), daemon=True, name="uv3d-warmup")
     thread.start()
     return thread
