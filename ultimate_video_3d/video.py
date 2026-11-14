@@ -17,6 +17,8 @@ Two colour rules earn their keep here, each from a real failure mode:
 
 from __future__ import annotations
 
+import contextlib
+import heapq
 import shutil
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass
@@ -86,6 +88,12 @@ def is_available() -> bool:
         import av  # noqa: F401
     except Exception:  # noqa: BLE001 - any import failure means unavailable
         return False
+    try:
+        # The one part of PyAV that loads its DLL later, the first time a file's tracks are listed. Loaded now, before the
+        # depth warm-up: while a model is being prepared, a DLL load on the window's thread waits for it (app.py).
+        import av.subtitles.stream  # noqa: F401
+    except Exception:  # noqa: BLE001
+        pass
     return True
 
 
@@ -508,6 +516,13 @@ class VideoWriter:
         self._stream.width, self._stream.height = self.size
         self._stream.pix_fmt = self._pix_fmt
         ctx = self._stream.codec_context
+        _as_default(self._stream)
+        try:
+            # Square pixels, said out loud. Unset, FFmpeg writes Matroska's DisplayUnit = 4 ("unknown") with no display
+            # size, which an older TV's parser may not accept (see ``_as_default``).
+            ctx.sample_aspect_ratio = Fraction(1, 1)
+        except Exception:  # noqa: BLE001
+            pass
         if bitrate_bps > 0 and family.uses_quality:                   # aim at a bitrate (or the bitrate a file size works out to)
             ctx.options = encoders.bitrate_options(encoder, family, bitrate_bps)
             self._stream.bit_rate = int(bitrate_bps * encoders.bitrate_bias(encoder))
@@ -631,6 +646,105 @@ class SegmentedWriter:
         self._finish()
 
 
+def _as_default(stream) -> None:
+    """Mark a track as the one to play.
+
+    FFmpeg's Matroska muxer writes FlagDefault = 0 on every track unless told otherwise (MakeMKV / mkvmerge files leave it
+    at 1), and a TV that only plays default tracks shows nothing: one of the suspects for "mkv -> mkv my TV doesn't read the
+    clip, mkv -> mp4 is readable" (LG 55LF652V, Discord). Harmless everywhere else.
+    """
+    try:
+        import av
+
+        stream.disposition = av.stream.Disposition.default
+    except Exception:  # noqa: BLE001 - an older PyAV without writable dispositions: the file still plays on a PC
+        pass
+
+
+def tidy_matroska(path: Path) -> bool:
+    """Change the picture's ``DisplayUnit`` from 4 ("unknown") to 0 (pixels) in a finished MKV, in place.
+
+    FFmpeg 6.1+ writes DisplayUnit = 4 with no display size whenever the *stream* has no stated pixel aspect, and PyAV has
+    no way to state one (the codec's 1:1 is not looked at). Unit 4 joined the Matroska spec years after many TVs were
+    made; to them it is a value they do not know. 0 is the spec's default and, with no display size, means "show it at
+    its pixel size", which is what the picture is. One byte changes, so nothing else moves; the Tracks CRC-32 that
+    FFmpeg stores is recomputed. Returns True if the file was changed. Never raises: the file plays on a PC either way.
+    """
+    import zlib
+
+    try:
+        with open(path, "r+b") as f:
+            head = bytearray(f.read(1 << 16))
+            spot = _matroska_display_unit(head)
+            if spot is None:
+                return False
+            unit_at, crc_at, crc_from, crc_to = spot
+            head[unit_at] = 0
+            if crc_at is not None:
+                head[crc_at:crc_at + 4] = zlib.crc32(bytes(head[crc_from:crc_to])).to_bytes(4, "little")
+                f.seek(crc_at)
+                f.write(head[crc_at:crc_at + 4])
+            f.seek(unit_at)
+            f.write(head[unit_at:unit_at + 1])
+        return True
+    except Exception:  # noqa: BLE001
+        return False
+
+
+def _matroska_display_unit(b: bytearray):
+    """Where DisplayUnit = 4 sits in the first bytes of a Matroska file, and its Tracks CRC-32 (offset, covered range)."""
+
+    def vint(i: int, keep_marker: bool) -> tuple[int, int]:
+        first = b[i]
+        n, mask = 1, 0x80
+        while not first & mask:
+            mask >>= 1
+            n += 1
+            if n > 8:
+                raise ValueError("not EBML")
+        value = first if keep_marker else first & (mask - 1)
+        for k in range(1, n):
+            value = (value << 8) | b[i + k]
+        return value, n
+
+    def element(i: int) -> tuple[int, int, int]:          # id, payload start, payload size
+        eid, n = vint(i, True)
+        size, m = vint(i + n, False)
+        return eid, i + n + m, size
+
+    eid, start, size = element(0)
+    if eid != 0x1A45DFA3:                                   # EBML header
+        return None
+    eid, i, _ = element(start + size)
+    if eid != 0x18538067:                                   # Segment
+        return None
+    while i + 8 < len(b):
+        eid, start, size = element(i)
+        if eid == 0x1F43B675:                               # Cluster: the header is over
+            return None
+        if eid == 0x1654AE6B and start + size <= len(b):    # Tracks
+            crc_at = start + 2 if b[start] == 0xBF and b[start + 1] == 0x84 else None
+            j = start + (6 if crc_at is not None else 0)
+            while j < start + size:
+                tid, tstart, tsize = element(j)
+                if tid == 0xAE:                             # TrackEntry
+                    k = tstart
+                    while k < tstart + tsize:
+                        vid, vstart, vsize = element(k)
+                        if vid == 0xE0:                     # Video
+                            m = vstart
+                            while m < vstart + vsize:
+                                uid, ustart, usize = element(m)
+                                if uid == 0x54B2 and usize == 1 and b[ustart] == 4:
+                                    return ustart, crc_at, start + 6, start + size
+                                m = ustart + usize
+                        k = vstart + vsize
+                j = tstart + tsize
+            return None
+        i = start + size
+    return None
+
+
 def join_segments(files: list[Path], counts: list[int], fps: float, destination: Path,
                   family: encoders.Family) -> None:
     """Put the segments end to end in one file by copying their packets (no re-encoding)."""
@@ -648,6 +762,7 @@ def join_segments(files: list[Path], counts: list[int], fps: float, destination:
                 stream = segment.streams.video[0]
                 if out_stream is None:
                     out_stream = out.add_stream_from_template(stream)
+                    _as_default(out_stream)
                     for key, value in dict(stream.metadata).items():
                         out_stream.metadata[key] = value      # e.g. the Matroska stereo_mode tag
                 for packet in segment.demux(stream):
@@ -693,6 +808,7 @@ def carry_video(video_only: Path, destination: Path) -> None:
     with av.open(str(video_only)) as vid, av.open(str(destination), mode="w") as out:
         stream = vid.streams.video[0]
         out_stream = out.add_stream_from_template(stream)
+        _as_default(out_stream)
         for key, value in dict(stream.metadata).items():
             out_stream.metadata[key] = value
         for packet in vid.demux(stream):
@@ -740,9 +856,10 @@ def mux_audio(
         trimming = start > 0 or duration is not None
         end = None if duration is None else start + duration
 
-        with av.open(str(video_only)) as vid, av.open(str(destination), mode="w") as out:
+        with contextlib.ExitStack() as stack, av.open(str(video_only)) as vid, av.open(str(destination), mode="w") as out:
             video_in = vid.streams.video[0]
             video_out = out.add_stream_from_template(video_in)
+            _as_default(video_out)
             for key, value in dict(video_in.metadata).items():
                 video_out.metadata[key] = value
 
@@ -764,54 +881,76 @@ def mux_audio(
                 if audio_out is None:
                     audio_out = out.add_stream(codec, rate=audio_in.rate)
                     audio_out.codec_context.time_base = Fraction(1, audio_in.rate)
+                _as_default(audio_out)
                 for key in ("language", "title"):                        # players show these in their track menus
                     if audio_in.metadata.get(key):
                         audio_out.metadata[key] = audio_in.metadata[key]
             sub_out = None
             if sub_in is not None:
                 sub_out = out.add_stream_from_template(sub_in)
+                _as_default(sub_out)                                     # the person chose it: show it
                 for key in ("language", "title"):
                     if sub_in.metadata.get(key):
                         sub_out.metadata[key] = sub_in.metadata[key]
 
-            for packet in vid.demux(video_in):
-                if packet.dts is None:
-                    continue
-                packet.stream = video_out
-                out.mux(packet)
-
+            # The streams are written *interleaved by time*. They used to go one after the other (the whole picture,
+            # then the whole soundtrack, then the subtitles): FFmpeg's interleaving queue only reorders a little, so
+            # in an MKV the picture ran ~50 s ahead of the sound at the start and the subtitles sat at the very end.
+            # PC players jump about using the index and never noticed; a TV reading the file front to back could not
+            # play it (Discord report: "mkv -> mkv my TV doesn't read the clip, mkv -> mp4 is readable").
+            streams = [_relabelled(vid.demux(video_in), video_out)]
             if audio_in is not None:
                 if remux:
-                    for packet in src.demux(audio_in):
-                        if packet.dts is None:
-                            continue
-                        packet.stream = audio_out
-                        out.mux(packet)
+                    streams.append(_relabelled(src.demux(audio_in), audio_out))
                 else:
-                    _reencode_audio_window(src, out, audio_in, audio_out, start if trimming else 0.0, end)
-
+                    streams.append(_reencoded_audio(src, audio_in, audio_out, start if trimming else 0.0, end))
             if sub_in is not None:
-                src.seek(0)                                              # the audio pass above read the file to its end
-                shift = round(start / float(sub_in.time_base)) if trimming else 0
-                for packet in src.demux(sub_in):
-                    stamp = packet.pts if packet.pts is not None else packet.dts
-                    if stamp is None:
-                        continue
-                    seconds = stamp * float(packet.time_base)
-                    if seconds < start or (end is not None and seconds >= end):
-                        continue
-                    if shift:
-                        if packet.pts is not None:
-                            packet.pts -= shift
-                        if packet.dts is not None:
-                            packet.dts -= shift
-                    packet.stream = sub_out
-                    out.mux(packet)
+                # Its own reader: the audio is being read from ``src`` at the same time.
+                sub_src = stack.enter_context(av.open(str(source)))
+                sub_stream = next(s for s in sub_src.streams.subtitles if s.index == sub_in.index)
+                streams.append(_subtitle_window(sub_src, sub_stream, sub_out, start, end, trimming))
+            for _, _, packet in heapq.merge(*(_timed(s, n) for n, s in enumerate(streams))):
+                out.mux(packet)
     return audio_in is not None
 
 
-def _reencode_audio_window(src, out, audio_in, audio_out, start: float, end: float | None) -> None:
-    """Encode a time window of audio into an already-created audio stream.
+def _relabelled(packets, stream):
+    """Packets with a decode time, moved onto ``stream`` of the output."""
+    for packet in packets:
+        if packet.dts is None:
+            continue
+        seconds = float(packet.dts * packet.time_base)
+        packet.stream = stream
+        yield seconds, packet
+
+
+def _timed(packets, order: int):
+    """``(seconds, order, packet)`` for ``heapq.merge``: ``order`` breaks ties, so packets themselves are never compared."""
+    for seconds, packet in packets:
+        yield seconds, order, packet
+
+
+def _subtitle_window(src, sub_in, sub_out, start: float, end: float | None, trimming: bool):
+    """The subtitle packets inside the converted range, re-timed so the range starts at zero."""
+    shift = round(start / float(sub_in.time_base)) if trimming else 0
+    for packet in src.demux(sub_in):
+        stamp = packet.pts if packet.pts is not None else packet.dts
+        if stamp is None:
+            continue
+        seconds = stamp * float(packet.time_base)
+        if seconds < start or (end is not None and seconds >= end):
+            continue
+        if shift:
+            if packet.pts is not None:
+                packet.pts -= shift
+            if packet.dts is not None:
+                packet.dts -= shift
+        packet.stream = sub_out
+        yield seconds - (start if trimming else 0.0), packet
+
+
+def _reencoded_audio(src, audio_in, audio_out, start: float, end: float | None):
+    """Encode a time window of audio for an already-created audio stream: yields ``(seconds, packet)``.
 
     Each frame needs ``sample_rate`` as well as ``pts``/``time_base``, and a FIFO
     repacketises to the encoder's fixed frame size - decoded frames do not arrive
@@ -834,7 +973,7 @@ def _reencode_audio_window(src, out, audio_in, audio_out, start: float, end: flo
         except Exception:  # noqa: BLE001 - decode from the top if seek is refused
             pass
 
-    def emit(flush: bool) -> None:
+    def emit(flush: bool):
         nonlocal counter
         while True:
             frame = fifo.read() if flush else fifo.read(frame_size)
@@ -844,8 +983,7 @@ def _reencode_audio_window(src, out, audio_in, audio_out, start: float, end: flo
             frame.time_base = time_base
             frame.sample_rate = rate
             counter += frame.samples
-            for packet in audio_out.encode(frame):
-                out.mux(packet)
+            yield from _encoded(audio_out.encode(frame))
             if flush:
                 return
 
@@ -860,7 +998,12 @@ def _reencode_audio_window(src, out, audio_in, audio_out, start: float, end: flo
         for resampled in resampler.resample(frame):
             resampled.pts = None
             fifo.write(resampled)
-        emit(flush=False)
-    emit(flush=True)
-    for packet in audio_out.encode():
-        out.mux(packet)
+        yield from emit(flush=False)
+    yield from emit(flush=True)
+    yield from _encoded(audio_out.encode())
+
+
+def _encoded(packets):
+    for packet in packets:
+        stamp = packet.dts if packet.dts is not None else packet.pts
+        yield (0.0 if stamp is None else float(stamp * packet.time_base)), packet

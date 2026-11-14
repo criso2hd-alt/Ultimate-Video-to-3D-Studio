@@ -32,6 +32,7 @@ from pathlib import Path
 
 import os
 import threading
+import time
 
 import cv2
 import numpy as np
@@ -183,8 +184,37 @@ _INV_STD1 = (1.0 / _STD.reshape(3)).astype(np.float32)
 #: calls are ~20 ms and the GPU serialises them anyway, so nothing is lost.
 _ORT_LOCK = threading.RLock()
 
+#: Seconds a frame above which the NVIDIA path counts as not working (an RTX 4080 does DA3 in ~8 ms, V2 in ~2 ms;
+#: DirectML does them in ~45 / ~20 ms). Something that slow is running on the CPU, or the card is not one it suits.
+NV_TOO_SLOW = 0.25
+
 _shared_lock = threading.Lock()
 _shared: "DepthEngine | None" = None
+
+#: GPU sessions are freed oldest first, never a newer one while an older one lives.
+#: With onnxruntime-directml 1.24.4, freeing a DirectML session breaks every *older* session still alive: its next
+#: ``run`` dies with an access violation - even in one thread, even under ``_ORT_LOCK``. Freeing the oldest while
+#: newer ones live is fine, and so is freeing a CPU session. 0.2.0/0.2.1 crashed this way after every conversion
+#: (the conversion made its own, newer session and dropped it while the preview's lived; the next preview frame
+#: crashed). Repro: make A, make B, free B, run A. 0.2.2 shares one engine, but a model switch during a long
+#: conversion, or a provider that fails its probe run, still freed a newer one.
+_gpu_order: list[int] = []          # tokens of the GPU sessions not yet freed, oldest first
+_parked: dict[int, object] = {}     # GPU sessions let go of while an older one was still alive
+_next_token = 0
+
+
+def _adopt_gpu_session() -> int:
+    """A token for a GPU session just created (caller holds ``_ORT_LOCK``)."""
+    global _next_token
+    _next_token += 1
+    _gpu_order.append(_next_token)
+    return _next_token
+
+
+def _free_parked() -> None:
+    """Free parked sessions that have become the oldest (caller holds ``_ORT_LOCK``)."""
+    while _gpu_order and _gpu_order[0] in _parked:
+        _parked.pop(_gpu_order.pop(0))      # the dict held the last reference: the session is destroyed here
 
 
 def engine_key(force_cpu: bool = False, model: str = FAST, nvidia: bool = False) -> tuple[str, bool, bool]:
@@ -214,6 +244,50 @@ def forget_shared() -> None:
         _shared = None
 
 
+def _open_nvidia(ort, path: Path, gpu_options):
+    """A TensorRT-RTX session, from the saved *EP context* when there is one.
+
+    Building the TensorRT engine from the ONNX file takes ~6 s (V2) / ~11 s (DA3) on an RTX 4080 at *every* launch, even
+    with the kernel cache, and while it runs Windows makes every other thread that loads a DLL wait (the window froze for
+    as long). The first build therefore also saves the engine as an EP-context model next to the kernel cache; later
+    launches open that in 0.4 s / 2 s with identical output. Keyed by model file, add-on version and driver, so an update
+    of any of them builds afresh; a saved one that will not open is deleted and rebuilt.
+    """
+    from . import accel
+
+    def nvidia_options(extra: dict[str, str] | None = None):
+        opts = gpu_options()
+        # A plugin EP is attached to the options, not named in ``providers``. Its compiled kernels are cached on disk.
+        opts.add_provider_for_devices(accel.devices(), {"nv_runtime_cache_path": str(accel.cache_dir())})
+        # All of the model on the card, or not at all: a graph the card cannot take was otherwise run partly on the CPU,
+        # and the fp16 file on the CPU crawls (Discord: "NVIDIA RTX acceleration is very slow, 0.2 fps"). Refused here,
+        # the next provider (DirectML, with the fp32 file) takes over.
+        opts.add_session_config_entry("session.disable_cpu_ep_fallback", "1")
+        for key, value in (extra or {}).items():
+            opts.add_session_config_entry(key, value)
+        return opts
+
+    saved = accel.context_path(path)
+    if saved is not None and saved.exists():
+        try:
+            return ort.InferenceSession(str(saved), sess_options=nvidia_options())
+        except Exception:  # noqa: BLE001 - stale or damaged: build from the model again
+            saved.unlink(missing_ok=True)
+    if saved is not None and accel.room_for_context(path):
+        partial = saved.with_name(saved.stem + ".part.onnx")
+        try:
+            session = ort.InferenceSession(str(path), sess_options=nvidia_options({
+                "ep.context_enable": "1", "ep.context_file_path": str(partial), "ep.context_embed_mode": "1"}))
+            if partial.exists():
+                os.replace(partial, saved)
+            return session
+        except Exception:  # noqa: BLE001 - saving is a bonus: fall back to a plain build below
+            pass
+        finally:
+            partial.unlink(missing_ok=True)
+    return ort.InferenceSession(str(path), sess_options=nvidia_options())
+
+
 class DepthEngine:
     """Runs the model. Safe to share between threads (calls are serialised)."""
 
@@ -224,6 +298,7 @@ class DepthEngine:
         self._input_name = ""
         self._force_cpu = False
         self._nvidia = False
+        self._token: int | None = None      # place in ``_gpu_order`` (None: no session, or a CPU one)
 
     @property
     def key(self) -> tuple[str, bool, bool]:
@@ -233,6 +308,28 @@ class DepthEngine:
     @property
     def loaded(self) -> bool:
         return self.session is not None
+
+    def close(self) -> None:
+        """Let go of the session. Never set ``session = None`` by hand: see ``_gpu_order`` for why the order matters.
+
+        A GPU session is freed now if it is the oldest one alive, otherwise parked until the older ones are gone.
+        """
+        with _ORT_LOCK:
+            session, self.session = self.session, None
+            token, self._token = self._token, None
+            if session is not None and token is not None:
+                _parked[token] = session
+            del session                     # a CPU session (the only reference) is destroyed here
+            _free_parked()
+
+    def __del__(self) -> None:
+        # An engine replaced by ``shared_engine`` (model, CPU or NVIDIA switch) or dropped by ``forget_shared`` dies
+        # in whichever thread lets go of it last: it must still go through ``close``.
+        try:
+            if self.session is not None:
+                self.close()
+        except Exception:  # noqa: BLE001 - interpreter shutdown: the lock or the module may already be gone
+            pass
 
     def load(self, progress: Callable[[str], None] | None = None, force_cpu: bool = False, nvidia: bool = False) -> str:
         """Open the model on the best working accelerator. Returns its label."""
@@ -267,13 +364,13 @@ class DepthEngine:
         errors: list[str] = []
         height, width = self.model.size
         for provider, label in candidates:
+            session = token = None
             try:
                 on_nvidia = provider == _NV_EP
                 path = locate(provider == "CPUExecutionProvider", self.model.key, on_nvidia) or model
                 if progress and on_nvidia:
                     progress("Preparing the depth model for your NVIDIA card (the first time takes a little while)…")
-                opts = options
-                if provider != "CPUExecutionProvider":
+                def gpu_options():
                     # The GPU does the work; ORT's CPU worker threads only feed it. By
                     # default they spin-wait between frames and eat most of the machine,
                     # starving the decoder, the warp and the UI for nothing.
@@ -284,15 +381,16 @@ class DepthEngine:
                     opts.execution_mode = ort.ExecutionMode.ORT_SEQUENTIAL
                     opts.intra_op_num_threads = 2
                     opts.add_session_config_entry("session.intra_op.allow_spinning", "0")
-                if on_nvidia:
-                    from . import accel
+                    return opts
 
-                    # A plugin EP is attached to the options, not named in ``providers``. Its compiled kernels are
-                    # cached on disk (per model and driver): later loads take a few seconds instead of ~15.
-                    opts.add_provider_for_devices(accel.devices(), {"nv_runtime_cache_path": str(accel.cache_dir())})
-                    session = ort.InferenceSession(str(path), sess_options=opts)
+                if on_nvidia:
+                    session = _open_nvidia(ort, path, gpu_options)
+                elif provider == "CPUExecutionProvider":
+                    session = ort.InferenceSession(str(path), options, providers=[provider])
                 else:
-                    session = ort.InferenceSession(str(path), opts, providers=[provider])
+                    session = ort.InferenceSession(str(path), gpu_options(), providers=[provider])
+                if provider != "CPUExecutionProvider":
+                    token = _adopt_gpu_session()
                 name = session.get_inputs()[0].name
                 # A provider can open a session and still fail (or return garbage)
                 # on the first real run, so prove it before committing.
@@ -300,11 +398,34 @@ class DepthEngine:
                 out = np.asarray(session.run(None, {name: probe})[0])
                 if not np.isfinite(out).all():
                     raise RuntimeError("non-finite output")
+                if on_nvidia:
+                    # The probe above paid for the first-run compile; now it must be quick, or DirectML does better.
+                    took = []
+                    for _ in range(3):
+                        began = time.perf_counter()
+                        session.run(None, {name: probe})
+                        took.append(time.perf_counter() - began)
+                    per_frame = sorted(took)[1]
+                    if per_frame > NV_TOO_SLOW:
+                        raise RuntimeError(f"{per_frame * 1000:.0f} ms a frame")
             except Exception as error:  # noqa: BLE001 - fall to the next provider
                 errors.append(f"{provider}: {error}")
+                if provider == _NV_EP:
+                    from . import accel
+
+                    accel.reject(str(error).splitlines()[0][:120] if str(error) else type(error).__name__)
+                if token is not None:
+                    _parked[token] = session    # a GPU session that failed its probe is freed in order, like any other
+                session = None
                 continue
-            self.session, self.device, self._input_name = session, label, name
+            if provider == _NV_EP:
+                from . import accel
+
+                accel.reject("")
+            self.session, self.device, self._input_name, self._token = session, label, name, token
+            _free_parked()
             return label
+        _free_parked()
         raise RuntimeError("Could not start the depth model on any device:\n" + "\n".join(errors))
 
     def infer(self, rgb: np.ndarray, bars: tuple[int, int, int, int] | None = None) -> np.ndarray:
@@ -332,7 +453,11 @@ class DepthEngine:
         batch = np.empty((1, 3, height, width), np.float32)
         _to_nchw(np.ascontiguousarray(small, np.float32), batch, _MEAN1, _INV_STD1)
         with _ORT_LOCK:
-            outputs = self.session.run(None, {self._input_name: batch})
+            session = self.session
+            if session is None:                 # closed by another thread since the check above
+                raise RuntimeError("Load the depth model first.")
+            outputs = session.run(None, {self._input_name: batch})
+            del session
         raw = np.asarray(outputs[0], np.float32).reshape(height, width)
         if self.model.output == "depth":
             raw = _from_depth(raw, np.asarray(outputs[1], np.float32).reshape(height, width))

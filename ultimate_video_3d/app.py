@@ -251,10 +251,11 @@ class FitScan(QObject):
     finished = Signal(object)
     failed = Signal(str)
 
-    def __init__(self, path, threed, start_ms: float, end_ms: float | None, parent=None, nvidia: bool = False) -> None:
+    def __init__(self, path, threed, start_ms: float, end_ms: float | None, parent=None, nvidia: bool = False,
+                 force_cpu: bool = False) -> None:
         super().__init__(parent)
         self._args = (path, threed, start_ms, end_ms)
-        self._nvidia = nvidia
+        self._nvidia, self._force_cpu = nvidia, force_cpu
         self._stop = threading.Event()
 
     def start(self) -> None:
@@ -267,7 +268,7 @@ class FitScan(QObject):
         try:
             path, threed, start_ms, end_ms = self._args
             result = comfortmod.scan(path, threed, start_ms, end_ms, progress=self.progress.emit, should_stop=self._stop.is_set,
-                                     nvidia=self._nvidia)
+                                     nvidia=self._nvidia, force_cpu=self._force_cpu)
             self.finished.emit(result)
         except Exception as error:  # noqa: BLE001 - reported in the panel, never allowed to take the app down
             self.failed.emit(f"{type(error).__name__}: {error}")
@@ -1325,7 +1326,7 @@ class MainWindow(QMainWindow):
             start_ms, end_ms = first / fps * 1000.0, (last + 1) / fps * 1000.0
         self._fit_limit = limit
         self._fit = FitScan(page.source, copy.deepcopy(self.settings.threed), start_ms, end_ms, self,
-                            nvidia=self.settings.nvidia_accel)
+                            nvidia=self.settings.nvidia_accel, force_cpu=self.settings.force_cpu_depth)
         self._fit.progress.connect(lambda f: page.threed.set_fit_state(True, f"Looking through the film... {f * 100:.0f}% (press Stop to cancel)"))
         self._fit.finished.connect(self._fit_done)
         self._fit.failed.connect(self._fit_failed)
@@ -1713,7 +1714,6 @@ class MainWindow(QMainWindow):
 
     def _start_initial_setup(self) -> None:
         resumemod.cleanup_stale()                        # paused conversions nobody came back to
-        self._warm()                                     # kernels and the depth model, once per launch
         self.gpus = sysinfo.detect_gpus()
         primary = sysinfo.primary_gpu(self.gpus)
         self.gauge.set_gpu_name(primary.short_name if primary else "No GPU")
@@ -1723,10 +1723,16 @@ class MainWindow(QMainWindow):
         self._gauge_timer.start(1200)
         self._describe_hardware()
         self._update_nvidia_note()
+        have_video = video.is_available()
+        # The warm-up comes *after* this thread has loaded its native libraries (PyAV above, the NVIDIA add-on and the
+        # GPU counters before it). While TensorRT-RTX (or DirectML, for DA3) prepares the model, Windows keeps any other
+        # thread that loads a DLL waiting: the window froze for 7-15 s in ``import av`` with NVIDIA acceleration on
+        # (longer on a card whose kernel cache is still empty). Measured with tests/perf_buffer.py.
+        self._warm()                                     # kernels and the depth model, once per launch
 
         if self.settings.check_updates:
             QTimer.singleShot(3000, self._check_updates)       # after the window is up; never blocks start-up
-        if not video.is_available():
+        if not have_video:
             self._download_video_support(then=self._after_video_support)
             return
         self._after_video_support()
@@ -2303,6 +2309,8 @@ class MainWindow(QMainWindow):
         self._update_vr_watch()
         if self.tabs.widget(index) is not self.library_page:
             self.library_page.pause()                    # leaving the Library stops its video
+        if self.tabs.widget(index) is self.settings_page:
+            self._update_nvidia_note()                   # the depth model may have turned the NVIDIA path down since
 
     def _finished(self, output) -> None:
         self._teardown()

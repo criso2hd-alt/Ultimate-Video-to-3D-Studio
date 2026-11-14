@@ -79,13 +79,14 @@ def measure_picture(rgb: np.ndarray, engine, stabilizer: depthmod.DepthStabilize
 
 def scan(path: str | Path, threed, start_ms: float = 0.0, end_ms: float | None = None, count: int = SAMPLES,
          engine=None, progress: Callable[[float], None] | None = None,
-         should_stop: Callable[[], bool] | None = None, nvidia: bool = False) -> ComfortScan:
+         should_stop: Callable[[], bool] | None = None, nvidia: bool = False, force_cpu: bool = False) -> ComfortScan:
     """Sample the film and measure it with ``threed`` (a settings.ThreeDSettings: strength, depth position, near/far, cleanup)."""
     import av
 
     info = video.probe(path)
     end = (info.duration * 1000.0) if end_ms is None else end_ms
-    engine = engine or depthmod.shared_engine(False, None, getattr(threed, "depth_model", depthmod.FAST), nvidia)
+    # Same engine as the preview (same CPU / NVIDIA switches), or it would replace the resident one and back again.
+    engine = engine or depthmod.shared_engine(force_cpu, None, getattr(threed, "depth_model", depthmod.FAST), nvidia)
     stab = depthmod.DepthStabilizer(0.0)
     params = threed.params()
     if params.strength <= 0:

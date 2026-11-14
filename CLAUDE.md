@@ -65,6 +65,27 @@ Things that each cost a debugging session:
 - **One ONNX session, one lock** (`depth.shared_engine`, `_ORT_LOCK`): two DirectML sessions
   created/run concurrently crash the driver (access violation). ORT spin-waiting is off for
   GPU providers.
+- **Never free a newer GPU session while an older one lives** (`depth._gpu_order`, `DepthEngine.close`): with
+  onnxruntime-directml 1.24.4, freeing a DirectML session breaks every *older* one (access violation on its next run),
+  even in one thread, even under the lock. 0.2.0/0.2.1 crashed this way after every conversion (Discord crash.log, 0.2.3).
+  Sessions are freed oldest first; one let go of early is parked. Never write `engine.session = None`: call `close()`.
+  Repro: make A, make B, free B, run A.
+- **Muxing interleaves by time** (`video.mux_audio`, `heapq.merge` of video / audio / subtitle packets). Writing the
+  streams one after another left the picture ~50 s ahead of the sound in an MKV and the subtitles at the end: PC players
+  coped (index), a TV reading front to back did not play the file.
+  Also for older TVs (LG 55LF652V played our MP4, not our MKV): every output track is marked default (`video._as_default`;
+  FFmpeg writes FlagDefault = 0 otherwise) and `video.tidy_matroska` turns FFmpeg 6.1+'s DisplayUnit = 4 ("unknown",
+  written because PyAV cannot set the *stream's* pixel aspect) into 0 in place, recomputing the Tracks CRC-32. Which of
+  the three the TV minded is not known (no such TV here).
+- **The NVIDIA path is all or nothing** (`depth._load`): `session.disable_cpu_ep_fallback` so a graph the card cannot
+  take fails instead of running partly on the CPU (fp16 on the CPU: "0.2 fps", Discord), and after the probe three runs
+  must beat `NV_TOO_SLOW` (0.25 s). A refusal falls to DirectML and `accel.rejected` puts the reason in Settings.
+- **While a depth model is being prepared, every other thread that loads a DLL waits** (Windows; measured: a tiny system
+  DLL took 11.4 s during a TensorRT load, 2.4 s during DirectML). The window froze in `import av` at launch. So the
+  window loads its native libraries (PyAV incl. its lazy `av.subtitles.stream`, the NVIDIA add-on, GPU counters) *before*
+  `_warm()`, and TensorRT loads from a saved EP-context engine (`depth._open_nvidia`, `accel.context_path`: per model
+  file, add-on version and driver, in `nvidia-trt-rtx/cache/engines`, ~ the model's size): V2 5.9 -> 0.4 s, DA3 11.4 -> 2 s,
+  identical output. DirectML + DA3 still freezes the window ~5 s at launch (cause not found yet).
 - The depth model is a fixed 518 px: preview resolution does **not** change its cost. Lowering
   the proxy (540p default) helps the render/decode side only.
 - Preview views use the fused `stereo.pack_frame` kernel, not numpy (numpy anaglyph/uint8

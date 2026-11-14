@@ -81,7 +81,7 @@ def run_selftest() -> int:
                     raw = engine.infer(frame)
                 line(f"{depth.MODELS[key].label} on {device}: {(time.perf_counter() - began) / runs * 1000:.1f} ms / frame"
                      f"  ({depth.locate(False, key, nvidia).name})")
-                engine.session = None
+                engine.close()
         engine = depth.DepthEngine()
         engine.load()
         raw = engine.infer(frame)

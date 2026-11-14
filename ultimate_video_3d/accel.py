@@ -126,6 +126,42 @@ def install(on_bytes: bootstrap.BytesProgress | None = None, on_text: bootstrap.
     return library_path()
 
 
+def context_path(model: Path) -> Path | None:
+    """Where the compiled engine for ``model`` is saved (see ``depth._open_nvidia``): one per model file, add-on version
+    and driver. None if the driver cannot be read (then nothing is saved: a stale engine is not worth the risk)."""
+    driver = driver_version()
+    if driver is None:
+        return None
+    try:
+        size = model.stat().st_size
+    except OSError:
+        return None
+    folder = cache_dir() / "engines"
+    folder.mkdir(parents=True, exist_ok=True)
+    tag = f"{model.stem}-{size}-trtrtx{VERSION}-driver{driver:g}"
+    for old in folder.glob(f"{model.stem}-*_ctx.onnx"):        # an older add-on or driver: its engine is no use now
+        if not old.name.startswith(tag):
+            old.unlink(missing_ok=True)
+    return folder / f"{tag}_ctx.onnx"
+
+
+def room_for_context(model: Path) -> bool:
+    """The saved engine is about the size of the model file: only if that leaves 2 GB free."""
+    try:
+        return shutil.disk_usage(cache_dir()).free - model.stat().st_size > 2_000_000_000
+    except OSError:
+        return False
+
+
+#: Why the depth model last refused the NVIDIA path on this machine ("" = it did not). Shown in Settings.
+rejected = ""
+
+
+def reject(reason: str) -> None:
+    global rejected
+    rejected = reason
+
+
 def register() -> bool:
     """Load the plugin into this process's ONNX Runtime (once). False if it is not installed or will not load."""
     global _registered
@@ -161,4 +197,8 @@ def status() -> str:
         return "Windows only."
     if not is_installed():
         return "Not downloaded yet (about 110 MB, from NVIDIA's package on PyPI)."
-    return "Ready." if register() else "Downloaded, but it did not start on this card or driver: DirectML is used."
+    if not register():
+        return "Downloaded, but it did not start on this card or driver: DirectML is used."
+    if rejected:
+        return f"Downloaded, but it did not run well on this card ({rejected}): DirectML is used instead."
+    return "Ready."

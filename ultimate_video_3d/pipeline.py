@@ -404,6 +404,8 @@ def convert_video(
             audio=export.audio, suffix=destination.suffix.lower(),
             audio_index=export.audio_track, subtitle_index=export.subtitle_track,
         )
+    if destination.suffix.lower() == ".mkv":
+        video.tidy_matroska(destination)                     # DisplayUnit "unknown" -> pixels, for older TVs
     if from_disc:
         source.discard()
     video_only.unlink(missing_ok=True)

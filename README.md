@@ -8,7 +8,7 @@
 
 Side-by-Side · Top-and-Bottom · Anaglyph · Colour + Depth, for VR headsets, 3D TVs, projectors and red/cyan glasses.
 
-[![Download](https://img.shields.io/badge/⬇%20Download-Windows%20v0.2.2-2ea44f.svg)](https://github.com/criso2hd-alt/Ultimate-Video-to-3D-Studio/releases/latest)
+[![Download](https://img.shields.io/badge/⬇%20Download-Windows%20v0.2.3-2ea44f.svg)](https://github.com/criso2hd-alt/Ultimate-Video-to-3D-Studio/releases/latest)
 [![Discord](https://img.shields.io/badge/Discord-join%20the%20community-5865F2.svg?logo=discord&logoColor=white)](https://discord.gg/mEfSW3XfNn)
 [![Platform](https://img.shields.io/badge/Windows-11-0078D4.svg)](#download)
 [![Any GPU](https://img.shields.io/badge/GPU-NVIDIA%20·%20AMD%20·%20Intel-76b900.svg)](#how-it-works)
@@ -64,6 +64,8 @@ Real screenshots of the app, taken at **2560 × 1440**. The footage is a scene g
 - **High quality depth (0.2.2).** Pick *High quality* under Depth model in the 3D panel to use Depth Anything 3 Mono-Large
   (a one-time 1.3 GB download): clearer layers and better distance. *Fast* (the built-in model) stays the default.
 - **NVIDIA RTX acceleration (0.2.2)**, optional, in Settings > Performance: depth about 2x to 5x faster on GeForce RTX cards.
+- **Fixes (0.2.3):** no more crash after a conversion when a setting is changed; MKV files now play on TVs that read the
+  file front to back; NVIDIA RTX acceleration starts in seconds and no longer freezes the window while it prepares.
 - **Watch in VR.** Put on a headset and watch your converted videos in a baked virtual home theatre (a cinema-style screen,
   seats you can move between, lights that dim while the film plays, a projector beam). A menu in the headset has a timeline,
   skip buttons, volume, lights, seats and rooms. Start it with the **Start VR** button in the Library. Black bars burned into

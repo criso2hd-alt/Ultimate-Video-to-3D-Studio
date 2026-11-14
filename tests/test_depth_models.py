@@ -198,3 +198,80 @@ def test_a_look_with_the_other_model_is_a_different_preview_cache():
 
     a, b = PreviewParams(mode="anaglyph"), PreviewParams(mode="anaglyph", depth_model="quality")
     assert a != b and a.engine_key == ("fast", False, False) and b.engine_key == ("quality", False, False)
+
+
+class _FakeSession:
+    """Stands in for an onnxruntime session; records when it is destroyed."""
+
+    def __init__(self, name, freed):
+        import weakref
+
+        self.name = name
+        weakref.finalize(self, freed.append, name)
+
+
+def _gpu_engine(name, freed):
+    engine = depth.DepthEngine()
+    with depth._ORT_LOCK:
+        engine.session = _FakeSession(name, freed)
+        engine._token = depth._adopt_gpu_session()
+    return engine
+
+
+def test_a_gpu_session_is_never_freed_while_an_older_one_is_alive(monkeypatch):
+    # onnxruntime-directml 1.24.4: freeing a DirectML session breaks every *older* one (access violation on its
+    # next run). 0.2.1 crashed after every conversion this way: its own newer session was dropped under the preview's.
+    monkeypatch.setattr(depth, "_gpu_order", [])
+    monkeypatch.setattr(depth, "_parked", {})
+    freed: list[str] = []
+    preview, conversion, other = _gpu_engine("preview", freed), _gpu_engine("conversion", freed), _gpu_engine("other", freed)
+
+    conversion.close()
+    assert freed == [] and conversion.session is None        # parked: "preview" is older and still in use
+    del other                                                # dropping the engine object goes the same way
+    assert freed == []
+    preview.close()                                          # the oldest may go, and then the parked ones in order
+    assert freed == ["preview", "conversion", "other"]
+    assert depth._gpu_order == [] and depth._parked == {}
+
+
+def test_freeing_the_oldest_gpu_session_does_not_wait(monkeypatch):
+    monkeypatch.setattr(depth, "_gpu_order", [])
+    monkeypatch.setattr(depth, "_parked", {})
+    freed: list[str] = []
+    old, new = _gpu_engine("old", freed), _gpu_engine("new", freed)
+    old.close()                                              # a model switch: the new engine exists, the old one goes
+    assert freed == ["old"]
+    with pytest.raises(RuntimeError):
+        old.infer(np.zeros((8, 8, 3), np.float32))           # a closed engine says so instead of crashing
+    new.close()
+    assert freed == ["old", "new"]
+
+
+def test_settings_says_when_the_nvidia_path_was_turned_down(monkeypatch):
+    monkeypatch.setattr(accel.sys, "platform", "win32")
+    monkeypatch.setattr(accel, "is_installed", lambda: True)
+    monkeypatch.setattr(accel, "register", lambda: True)
+    monkeypatch.setattr(accel, "rejected", "")
+    assert accel.status() == "Ready."
+    accel.reject("900 ms a frame")
+    assert "did not run well on this card (900 ms a frame)" in accel.status() and "DirectML" in accel.status()
+
+
+def test_a_saved_tensorrt_engine_belongs_to_one_model_addon_and_driver(monkeypatch, tmp_path):
+    monkeypatch.setattr(accel, "cache_dir", lambda: tmp_path)
+    model = tmp_path / "Depth-Anything-3-Mono-Large.fp16.onnx"
+    model.write_bytes(b"x" * 10)
+    monkeypatch.setattr(accel, "driver_version", lambda: 591.59)
+    first = accel.context_path(model)
+    assert first.name == f"Depth-Anything-3-Mono-Large.fp16-10-trtrtx{accel.VERSION}-driver591.59_ctx.onnx"
+    first.write_bytes(b"engine")
+    other = tmp_path / "engines" / "Depth-Anything-V2-Small-hf.fp16-5-trtrtx0.5.0-driver591.59_ctx.onnx"
+    other.write_bytes(b"engine")
+    assert accel.context_path(model) == first and first.exists()       # same everything: kept
+    monkeypatch.setattr(accel, "driver_version", lambda: 600.1)
+    newer = accel.context_path(model)
+    assert newer != first and not first.exists()                        # a new driver: the old engine is deleted
+    assert other.exists()                                               # another model's engine is left alone
+    monkeypatch.setattr(accel, "driver_version", lambda: None)
+    assert accel.context_path(model) is None                            # driver unknown: nothing is saved

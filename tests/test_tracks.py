@@ -206,3 +206,62 @@ def test_a_picture_moved_between_containers_keeps_its_picture(tmp_path):
     same = tmp_path / "same.mp4"
     video.carry_video(base, same)
     assert same.read_bytes() == base.read_bytes()                         # same container: a plain copy
+
+
+def _worst_gap(path: Path) -> float:
+    """How far the picture and the sound drift apart while the file is read front to back, the way a TV reads it."""
+    with av.open(str(path)) as f:
+        last = {}
+        worst = 0.0
+        for packet in f.demux():
+            if not packet.size or packet.pts is None:
+                continue
+            last[packet.stream.type] = float(packet.pts * packet.time_base)
+            if "video" in last and "audio" in last:
+                worst = max(worst, abs(last["video"] - last["audio"]))
+    return worst
+
+
+@pytest.mark.parametrize("audio", ["copy", "aac"])
+def test_picture_sound_and_subtitles_are_interleaved_so_a_tv_can_play_the_mkv(tmp_path, audio):
+    # Discord report: "mkv -> mkv my TV doesn't read the clip, mkv -> mp4 is readable". The streams were written one
+    # after the other, and in an MKV the picture ran ~50 s ahead of the sound (subtitles at the very end).
+    source = make_rip(tmp_path / "long.mkv", seconds=30.0, size=(160, 120))
+    base = tmp_path / "picture.mkv"
+    with av.open(str(source)) as s, av.open(str(base), "w") as o:
+        vi = s.streams.video[0]
+        vo = o.add_stream_from_template(vi)
+        for packet in s.demux(vi):
+            if packet.dts is not None:
+                packet.stream = vo
+                o.mux(packet)
+    subs = video.list_tracks(source)[1]
+    out = tmp_path / "out.mkv"
+    video.mux_audio(source, base, out, audio=audio, suffix=".mkv", subtitle_index=subs[0].index)
+    assert _worst_gap(out) < 1.0
+    with av.open(str(out)) as f:                            # the subtitle line at 0.1 s comes near the start of the file
+        kinds = [p.stream.type for p in f.demux() if p.size]
+    assert "subtitle" in kinds[: len(kinds) // 10]
+
+
+def test_an_mkv_marks_its_tracks_default_and_states_square_pixels_for_older_tvs(rip, tmp_path):
+    # FFmpeg writes FlagDefault = 0 on every Matroska track and DisplayUnit = 4 ("unknown"); an older TV
+    # (LG 55LF652V, Discord) played the app's MP4 but not its MKV.
+    import zlib
+
+    base = make_video_only(tmp_path / "v.mp4")
+    out = tmp_path / "out.mkv"
+    video.mux_audio(rip, base, out, audio="copy", suffix=".mkv")
+    head = bytearray(out.read_bytes()[:1 << 16])
+    spot = video._matroska_display_unit(head)                  # FFmpeg's "unknown" unit is there before tidying
+    assert spot is not None
+    assert video.tidy_matroska(out) is True
+    head = bytearray(out.read_bytes()[:1 << 16])
+    assert video._matroska_display_unit(head) is None
+    assert video.tidy_matroska(out) is False                  # nothing left to change
+    unit_at, crc_at, crc_from, crc_to = spot
+    assert head[unit_at] == 0
+    assert int.from_bytes(head[crc_at:crc_at + 4], "little") == zlib.crc32(bytes(head[crc_from:crc_to]))   # CRC still right
+    with av.open(str(out)) as f:
+        assert all(int(s.disposition) & 1 for s in f.streams)     # every track is a default one
+        assert sum(1 for p in f.demux() if p.size) > 0
